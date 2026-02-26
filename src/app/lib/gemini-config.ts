@@ -1,6 +1,6 @@
 import { Modality, Type, type FunctionDeclaration, type LiveConnectConfig } from "@google/genai";
 
-export const GEMINI_MODEL = "gemini-live-2.5-flash-native-audio";
+export const GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
 
 export const SYSTEM_INSTRUCTION = `You are a friendly, patient CalFresh (SNAP) application assistant helping someone fill out the CF 285 form over a voice conversation.
 

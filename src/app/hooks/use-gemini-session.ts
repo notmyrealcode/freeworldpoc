@@ -130,8 +130,8 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       }
       const { token } = await tokenRes.json();
 
-      // 2. Create GenAI client with ephemeral token
-      const ai = new GoogleGenAI({ apiKey: token });
+      // 2. Create GenAI client with ephemeral token (v1alpha required for ephemeral tokens)
+      const ai = new GoogleGenAI({ apiKey: token, httpOptions: { apiVersion: "v1alpha" } });
 
       // 3. Set up audio playback with speaking state callback
       const playback = new AudioPlayback((playing: boolean) => {
@@ -172,8 +172,8 @@ export function useGeminiSession(): UseGeminiSessionReturn {
             }
           },
           onerror: (e: ErrorEvent) => {
-            console.error("Gemini session error:", e);
-            setError(e.message);
+            console.error("Gemini session error:", e.message || e.error || e);
+            setError(e.message || "WebSocket connection error");
           },
           onclose: () => {
             setIsConnected(false);
