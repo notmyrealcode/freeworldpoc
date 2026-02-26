@@ -3,6 +3,19 @@ export class AudioCapture {
   private stream: MediaStream | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private onChunk: ((base64: string) => void) | null = null;
+  private _paused: boolean = false;
+
+  get paused(): boolean {
+    return this._paused;
+  }
+
+  pause(): void {
+    this._paused = true;
+  }
+
+  resume(): void {
+    this._paused = false;
+  }
 
   async start(onChunk: (base64: string) => void): Promise<void> {
     this.onChunk = onChunk;
@@ -23,6 +36,7 @@ export class AudioCapture {
     this.workletNode = new AudioWorkletNode(this.audioContext, "audio-capture-processor");
 
     this.workletNode.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      if (this._paused) return;
       const pcmBuffer = event.data;
       const base64 = this.arrayBufferToBase64(pcmBuffer);
       this.onChunk?.(base64);

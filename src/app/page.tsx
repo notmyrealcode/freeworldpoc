@@ -7,13 +7,17 @@ import { FormSidebar } from "@/app/components/form-sidebar";
 export default function Home() {
   const {
     isConnected,
+    isPaused,
     isComplete,
     currentQuestion,
+    confirmationPrompt,
     formData,
     error,
-    aiSpeaking,
+    voiceStatus,
     startSession,
     stopSession,
+    pauseSession,
+    resumeSession,
   } = useGeminiSession();
 
   return (
@@ -22,12 +26,16 @@ export default function Home() {
       <div className="flex-1 border-r border-gray-200">
         <ConversationPanel
           isConnected={isConnected}
+          isPaused={isPaused}
           isComplete={isComplete}
           currentQuestion={currentQuestion}
+          confirmationPrompt={confirmationPrompt}
           error={error}
-          aiSpeaking={aiSpeaking}
+          voiceStatus={voiceStatus}
           onStart={startSession}
           onStop={stopSession}
+          onPause={pauseSession}
+          onResume={resumeSession}
         />
       </div>
 

@@ -2,6 +2,7 @@ export class AudioPlayback {
   private audioContext: AudioContext;
   private nextStartTime: number = 0;
   private _isPlaying: boolean = false;
+  private _paused: boolean = false;
   private activeSources: AudioBufferSourceNode[] = [];
   private onPlayingChange: ((playing: boolean) => void) | null = null;
 
@@ -14,6 +15,19 @@ export class AudioPlayback {
     return this._isPlaying;
   }
 
+  get paused(): boolean {
+    return this._paused;
+  }
+
+  pause(): void {
+    this._paused = true;
+    this.interrupt();
+  }
+
+  unpause(): void {
+    this._paused = false;
+  }
+
   private setPlaying(value: boolean): void {
     if (this._isPlaying !== value) {
       this._isPlaying = value;
@@ -22,6 +36,8 @@ export class AudioPlayback {
   }
 
   play(base64Pcm: string): void {
+    if (this._paused) return;
+
     const pcmBytes = atob(base64Pcm);
     const pcmArray = new Int16Array(pcmBytes.length / 2);
     for (let i = 0; i < pcmBytes.length; i += 2) {
@@ -72,7 +88,7 @@ export class AudioPlayback {
     this.setPlaying(false);
   }
 
-  async resume(): Promise<void> {
+  async resumeAudioContext(): Promise<void> {
     if (this.audioContext.state === "suspended") {
       await this.audioContext.resume();
     }
