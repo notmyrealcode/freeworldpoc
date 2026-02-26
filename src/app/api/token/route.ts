@@ -49,7 +49,7 @@ export async function POST() {
   const client = new GoogleGenAI({ apiKey });
 
   const expireTime = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-  const newSessionExpireTime = new Date(Date.now() + 2 * 60 * 1000);
+  const newSessionExpireTime = new Date(Date.now() + 2 * 60 * 1000).toISOString();
 
   try {
     const token = await client.authTokens.create({
