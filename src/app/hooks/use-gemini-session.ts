@@ -6,6 +6,7 @@ import { GEMINI_MODEL, SESSION_CONFIG } from "@/app/lib/gemini-config";
 import { AudioCapture } from "@/app/lib/audio-capture";
 import { AudioPlayback } from "@/app/lib/audio-playback";
 import { type SnapFormData } from "@/app/lib/form-schema";
+import { maskSSN } from "@/app/lib/form-schema";
 import {
   FIELD_ORDER,
   fieldIndex,
@@ -225,9 +226,12 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
         switch (name) {
           case "confirm_value": {
+            // Mask SSN on screen as defense-in-depth (Gemini should only send last 4, but just in case)
+            const displayValue =
+              currentField?.id === "ssn" ? maskSSN(args.value) : args.value;
             setConfirmationPrompt({
               field: currentField?.id ?? "",
-              value: args.value,
+              value: displayValue,
               prompt: args.prompt,
             });
             setFieldState((prev) => ({
@@ -242,11 +246,30 @@ export function useGeminiSession(): UseGeminiSessionReturn {
                   "Value is now displayed on screen. STOP and wait for the user to verbally confirm or deny before calling field_complete. Do NOT call field_complete yet.",
               },
             });
+            // Send error responses for any remaining batched tool calls so Gemini doesn't hang
+            for (let j = functionCalls.indexOf(fc) + 1; j < functionCalls.length; j++) {
+              const dropped = functionCalls[j];
+              responses.push({
+                id: dropped.id ?? "",
+                name: dropped.name ?? "",
+                response: {
+                  result:
+                    "error: blocked by confirmation gate. Wait for user confirmation before proceeding.",
+                },
+              });
+            }
             return responses;
           }
 
           case "field_complete": {
-            const confirmedValue = args.value;
+            // Normalize yes/no values so skipIf comparisons are consistent
+            const rawValue = args.value;
+            const confirmedValue =
+              currentField?.type === "yes_no"
+                ? rawValue.toLowerCase().startsWith("y")
+                  ? "Yes"
+                  : "No"
+                : rawValue;
             const fieldId = currentField?.id;
 
             if (fieldId) {
@@ -258,11 +281,13 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
               if (fs.returnToIndex !== null) {
                 const returnIdx = fs.returnToIndex;
-                setFieldState({
+                const newState: FieldState = {
                   currentIndex: returnIdx,
                   returnToIndex: null,
                   machineState: "asking",
-                });
+                };
+                setFieldState(newState);
+                fieldStateRef.current = newState;
                 const returnField = FIELD_ORDER[returnIdx];
                 if (returnField) {
                   setCurrentQuestion({
@@ -306,14 +331,13 @@ export function useGeminiSession(): UseGeminiSessionReturn {
               break;
             }
 
-            setFieldState((prev) => {
-              const returnTo = prev.returnToIndex === null ? prev.currentIndex : prev.returnToIndex;
-              return {
-                currentIndex: targetIndex,
-                returnToIndex: returnTo,
-                machineState: "correcting",
-              };
-            });
+            const newState: FieldState = {
+              currentIndex: targetIndex,
+              returnToIndex: fs.returnToIndex === null ? fs.currentIndex : fs.returnToIndex,
+              machineState: "correcting",
+            };
+            setFieldState(newState);
+            fieldStateRef.current = newState;
 
             const targetField = FIELD_ORDER[targetIndex];
             setCurrentQuestion({

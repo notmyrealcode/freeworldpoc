@@ -75,7 +75,7 @@ export function completedFieldsSummary(formData: SnapFormData): string {
   const entries = FIELD_ORDER
     .filter((f) => formData[f.id] !== undefined)
     .map((f) => {
-      const value = f.id === "ssn" ? maskSSN(formData[f.id]) : formData[f.id];
+      const value = f.id === "ssn" ? maskSSN(formData[f.id] ?? "") : formData[f.id];
       return `${f.id}=${value}`;
     });
   return entries.length > 0 ? entries.join(", ") : "(none yet)";

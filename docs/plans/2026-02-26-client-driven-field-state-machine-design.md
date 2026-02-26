@@ -93,7 +93,7 @@ if (state.returnToIndex !== null) {
 
 ## Gemini's Tool Surface
 
-Only **3 tools** at any time:
+**4 tools:**
 
 ### confirm_value(value, prompt)
 Display a value on screen for the user to visually confirm. Gemini calls this after the user provides an answer.
@@ -103,6 +103,9 @@ Signal the current field is done with the confirmed value. The client updates fo
 
 ### request_correction(field_id)
 The user wants to fix a previously completed field. Gemini resolves the user's natural language ("fix my address") to a field_id from the previously-completed list. The client rewinds the state machine.
+
+### mark_complete()
+Mark the form as complete. Gemini calls this after summarizing all fields and the user confirms.
 
 ## What the Client Sends to Gemini
 
@@ -235,7 +238,7 @@ const FIELD_ORDER: FieldDefinition[] = [
 ## Benefits Over Current Architecture
 
 - **No more field-batching bugs** — Gemini literally cannot ask for multiple fields
-- **No more tool-call batching** — only 3 tools with clear single-step semantics
+- **No more tool-call batching** — only 4 tools with clear single-step semantics
 - **Simpler prompt** — ~15 lines base prompt vs ~80 lines today
 - **Skip logic in code** — `skipIf` functions, not prompt engineering
 - **Deterministic field order** — impossible for Gemini to skip or reorder
