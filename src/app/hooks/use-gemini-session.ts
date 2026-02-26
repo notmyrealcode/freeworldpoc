@@ -5,7 +5,13 @@ import { GoogleGenAI, type LiveServerMessage } from "@google/genai";
 import { GEMINI_MODEL, SESSION_CONFIG } from "@/app/lib/gemini-config";
 import { AudioCapture } from "@/app/lib/audio-capture";
 import { AudioPlayback } from "@/app/lib/audio-playback";
-import { VALID_FIELD_IDS, type SnapFormData } from "@/app/lib/form-schema";
+import { type SnapFormData } from "@/app/lib/form-schema";
+import {
+  FIELD_ORDER,
+  fieldIndex,
+  completedFieldsSummary,
+  type FieldDefinition,
+} from "@/app/lib/field-definitions";
 
 export interface CurrentQuestion {
   field: string;
@@ -24,6 +30,21 @@ export interface ConfirmationPrompt {
 //   "speaking"    — model audio is playing
 export type VoiceStatus = "listening" | "processing" | "speaking";
 
+export type FieldMachineState =
+  | "idle"
+  | "welcome"
+  | "asking"
+  | "confirming"
+  | "correcting"
+  | "summary"
+  | "done";
+
+interface FieldState {
+  currentIndex: number;
+  returnToIndex: number | null;
+  machineState: FieldMachineState;
+}
+
 interface UseGeminiSessionReturn {
   isConnected: boolean;
   isPaused: boolean;
@@ -33,6 +54,7 @@ interface UseGeminiSessionReturn {
   formData: SnapFormData;
   error: string | null;
   voiceStatus: VoiceStatus;
+  machineState: FieldMachineState;
   startSession: () => Promise<void>;
   stopSession: () => void;
   pauseSession: () => void;
@@ -51,6 +73,16 @@ export function useGeminiSession(): UseGeminiSessionReturn {
   const [error, setError] = useState<string | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("listening");
 
+  const [fieldState, setFieldState] = useState<FieldState>({
+    currentIndex: 0,
+    returnToIndex: null,
+    machineState: "idle",
+  });
+  const fieldStateRef = useRef<FieldState>(fieldState);
+  fieldStateRef.current = fieldState;
+  const formDataRef = useRef<SnapFormData>(formData);
+  formDataRef.current = formData;
+
   const sessionRef = useRef<Awaited<
     ReturnType<InstanceType<typeof GoogleGenAI>["live"]["connect"]>
   > | null>(null);
@@ -60,6 +92,121 @@ export function useGeminiSession(): UseGeminiSessionReturn {
   const aiSpeakingRef = useRef(false);
   // Track paused state in a ref so the onmessage closure can check it
   const pausedRef = useRef(false);
+
+  const sendFieldMessage = useCallback(
+    (field: FieldDefinition, isCorrection: boolean, currentFormData: SnapFormData) => {
+      const session = sessionRef.current;
+      if (!session) return;
+
+      const completed = completedFieldsSummary(currentFormData);
+      const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
+      const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
+
+      let text: string;
+      if (isCorrection) {
+        const currentValue = currentFormData[field.id] ?? "(no value)";
+        text = [
+          `Correction: ${field.id}`,
+          `Label: ${field.label}`,
+          `Type: ${typeLabel}`,
+          `Current value: ${currentValue}`,
+          hints,
+          `Previously completed: ${completed}`,
+          "",
+          "The user wants to correct this value. Ask them for the updated value.",
+        ].join("\n");
+      } else {
+        text = [
+          `Next field: ${field.id}`,
+          `Label: ${field.label}`,
+          `Type: ${typeLabel}`,
+          hints,
+          `Previously completed: ${completed}`,
+          "",
+          "Ask the user for this value.",
+        ].join("\n");
+      }
+
+      session.sendClientContent({
+        turns: [{ role: "user", parts: [{ text }] }],
+        turnComplete: true,
+      });
+    },
+    []
+  );
+
+  const sendResumeFieldMessage = useCallback(
+    (field: FieldDefinition, currentFormData: SnapFormData) => {
+      const session = sessionRef.current;
+      if (!session) return;
+
+      const completed = completedFieldsSummary(currentFormData);
+      const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
+      const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
+
+      const text = [
+        `Resuming: ${field.id}`,
+        `Label: ${field.label}`,
+        `Type: ${typeLabel}`,
+        hints,
+        `Previously completed: ${completed}`,
+        "",
+        "A correction was just completed. Continue collecting this field from where you left off.",
+      ].join("\n");
+
+      session.sendClientContent({
+        turns: [{ role: "user", parts: [{ text }] }],
+        turnComplete: true,
+      });
+    },
+    []
+  );
+
+  const advanceToNextField = useCallback(
+    (fromIndex: number, currentFormData: SnapFormData) => {
+      let nextIndex = fromIndex;
+      while (nextIndex < FIELD_ORDER.length) {
+        const field = FIELD_ORDER[nextIndex];
+        if (field.skipIf && field.skipIf(currentFormData)) {
+          nextIndex++;
+          continue;
+        }
+        break;
+      }
+
+      if (nextIndex >= FIELD_ORDER.length) {
+        setFieldState((prev) => ({
+          ...prev,
+          currentIndex: nextIndex,
+          machineState: "summary",
+        }));
+        setCurrentQuestion(null);
+        sessionRef.current?.sendClientContent({
+          turns: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: "All fields have been collected. Please summarize everything you've gathered and ask if it all looks correct. If the user confirms, call mark_complete to finish.",
+                },
+              ],
+            },
+          ],
+          turnComplete: true,
+        });
+      } else {
+        const field = FIELD_ORDER[nextIndex];
+        setFieldState((prev) => ({
+          ...prev,
+          currentIndex: nextIndex,
+          machineState: "asking",
+        }));
+        setCurrentQuestion({ field: field.id, question: field.label });
+        sendFieldMessage(field, false, currentFormData);
+      }
+    },
+    [sendFieldMessage]
+  );
 
   const handleFunctionCall = useCallback(
     (functionCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>) => {
@@ -73,73 +220,137 @@ export function useGeminiSession(): UseGeminiSessionReturn {
         const args = (fc.args ?? {}) as Record<string, string>;
         const id = fc.id ?? "";
         const name = fc.name ?? "";
+        const fs = fieldStateRef.current;
+        const currentField = FIELD_ORDER[fs.currentIndex];
 
         switch (name) {
-          case "update_field":
-            if (!VALID_FIELD_IDS.has(args.field)) {
-              console.warn(`Unknown field ID from Gemini: "${args.field}"`);
-              responses.push({
-                id,
-                name,
-                response: {
-                  result: `error: unknown field "${args.field}". Valid fields: ${[...VALID_FIELD_IDS].join(", ")}`,
-                },
-              });
-              continue;
-            }
-            setFormData((prev: SnapFormData) => ({
-              ...prev,
-              [args.field]: args.value,
-            }));
-            // Clear confirmation for this field since it's now confirmed
-            setConfirmationPrompt((prev) =>
-              prev?.field === args.field ? null : prev
-            );
-            break;
-
-          case "set_current_question":
-            setCurrentQuestion({
-              field: args.field,
-              question: args.question,
-            });
-            // Clear any lingering confirmation when moving to next question
-            setConfirmationPrompt(null);
-            break;
-
-          case "confirm_value":
+          case "confirm_value": {
             setConfirmationPrompt({
-              field: args.field,
+              field: currentField?.id ?? "",
               value: args.value,
               prompt: args.prompt,
             });
+            setFieldState((prev) => ({
+              ...prev,
+              machineState: "confirming",
+            }));
             responses.push({
               id,
               name,
               response: {
                 result:
-                  "Value is now displayed on screen. STOP and wait for the user to verbally confirm or deny before calling update_field. Do NOT call update_field or set_current_question yet.",
+                  "Value is now displayed on screen. STOP and wait for the user to verbally confirm or deny before calling field_complete. Do NOT call field_complete yet.",
               },
             });
-            // Stop processing remaining calls in this batch — if Gemini
-            // batched update_field or set_current_question after confirm_value,
-            // executing them would bypass the user's verbal confirmation
             return responses;
+          }
 
-          case "mark_complete":
-            setIsComplete(true);
+          case "field_complete": {
+            const confirmedValue = args.value;
+            const fieldId = currentField?.id;
+
+            if (fieldId) {
+              const updatedFormData = { ...formDataRef.current, [fieldId]: confirmedValue };
+              setFormData(updatedFormData);
+              formDataRef.current = updatedFormData;
+
+              setConfirmationPrompt(null);
+
+              if (fs.returnToIndex !== null) {
+                const returnIdx = fs.returnToIndex;
+                setFieldState({
+                  currentIndex: returnIdx,
+                  returnToIndex: null,
+                  machineState: "asking",
+                });
+                const returnField = FIELD_ORDER[returnIdx];
+                if (returnField) {
+                  setCurrentQuestion({
+                    field: returnField.id,
+                    question: returnField.label,
+                  });
+                  sendResumeFieldMessage(returnField, updatedFormData);
+                }
+              } else {
+                advanceToNextField(fs.currentIndex + 1, updatedFormData);
+              }
+            }
+
+            responses.push({ id, name, response: { result: "ok" } });
             break;
-        }
+          }
 
-        responses.push({
-          id,
-          name,
-          response: { result: "ok" },
-        });
+          case "request_correction": {
+            const targetFieldId = args.field_id;
+            const targetIndex = fieldIndex(targetFieldId);
+
+            if (targetIndex === -1) {
+              responses.push({
+                id,
+                name,
+                response: {
+                  result: `error: unknown field "${targetFieldId}". Ask the user to clarify which field they want to correct.`,
+                },
+              });
+              break;
+            }
+
+            if (!formDataRef.current[targetFieldId]) {
+              responses.push({
+                id,
+                name,
+                response: {
+                  result: `Field "${targetFieldId}" hasn't been filled yet. Ask the user which completed field they want to correct.`,
+                },
+              });
+              break;
+            }
+
+            setFieldState((prev) => {
+              const returnTo = prev.returnToIndex === null ? prev.currentIndex : prev.returnToIndex;
+              return {
+                currentIndex: targetIndex,
+                returnToIndex: returnTo,
+                machineState: "correcting",
+              };
+            });
+
+            const targetField = FIELD_ORDER[targetIndex];
+            setCurrentQuestion({
+              field: targetField.id,
+              question: targetField.label,
+            });
+            setConfirmationPrompt(null);
+            sendFieldMessage(targetField, true, formDataRef.current);
+
+            responses.push({ id, name, response: { result: "ok" } });
+            break;
+          }
+
+          case "mark_complete": {
+            setFieldState((prev) => ({
+              ...prev,
+              machineState: "done",
+            }));
+            setIsComplete(true);
+            setConfirmationPrompt(null);
+            responses.push({ id, name, response: { result: "ok" } });
+            break;
+          }
+
+          default: {
+            responses.push({
+              id,
+              name,
+              response: { result: `error: unknown tool "${name}"` },
+            });
+          }
+        }
       }
 
       return responses;
     },
-    []
+    [advanceToNextField, sendFieldMessage, sendResumeFieldMessage]
   );
 
   // Shared cleanup — nulls refs first, then closes resources.
@@ -161,6 +372,11 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     setVoiceStatus("listening");
     aiSpeakingRef.current = false;
     pausedRef.current = false;
+    setFieldState({
+      currentIndex: 0,
+      returnToIndex: null,
+      machineState: "idle",
+    });
   }, []);
 
   const pauseSession = useCallback(() => {
@@ -257,6 +473,33 @@ export function useGeminiSession(): UseGeminiSessionReturn {
               if (!playback.isPlaying) {
                 setVoiceStatus("listening");
               }
+
+              // After welcome turn completes, send the first field
+              const fs = fieldStateRef.current;
+              if (fs.machineState === "welcome") {
+                fieldStateRef.current = { ...fs, machineState: "asking" };
+
+                const currentFormData = formDataRef.current;
+                let firstIdx = 0;
+                while (firstIdx < FIELD_ORDER.length) {
+                  const f = FIELD_ORDER[firstIdx];
+                  if (f.skipIf && f.skipIf(currentFormData)) {
+                    firstIdx++;
+                    continue;
+                  }
+                  break;
+                }
+                if (firstIdx < FIELD_ORDER.length) {
+                  const field = FIELD_ORDER[firstIdx];
+                  setFieldState({
+                    currentIndex: firstIdx,
+                    returnToIndex: null,
+                    machineState: "asking",
+                  });
+                  setCurrentQuestion({ field: field.id, question: field.label });
+                  sendFieldMessage(field, false, currentFormData);
+                }
+              }
             }
 
             // Handle function calls — use ref to avoid sending on dead socket
@@ -283,6 +526,12 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
       // 5. Kick off the conversation before starting mic capture —
       //    sending text and audio simultaneously confuses Gemini's turn-taking
+      setFieldState({
+        currentIndex: 0,
+        returnToIndex: null,
+        machineState: "welcome",
+      });
+
       try {
         session.sendClientContent({
           turns: [
@@ -329,7 +578,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       cleanup();
       session?.close();
     }
-  }, [handleFunctionCall, cleanup]);
+  }, [handleFunctionCall, cleanup, sendFieldMessage]);
 
   // Cleanup on unmount — prevent WebSocket/mic/AudioContext leaks
   useEffect(() => {
@@ -353,6 +602,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     formData,
     error,
     voiceStatus,
+    machineState: fieldState.machineState,
     startSession,
     stopSession,
     pauseSession,
