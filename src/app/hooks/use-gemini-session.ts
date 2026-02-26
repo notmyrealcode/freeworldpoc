@@ -93,77 +93,76 @@ export function useGeminiSession(): UseGeminiSessionReturn {
   // Track paused state in a ref so the onmessage closure can check it
   const pausedRef = useRef(false);
 
+  // --- Pure text builders (no side effects, no WebSocket sends) ---
+
+  function buildFieldText(field: FieldDefinition, isCorrection: boolean, currentFormData: SnapFormData): string {
+    const completed = completedFieldsSummary(currentFormData);
+    const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
+    const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
+
+    if (isCorrection) {
+      const currentValue = currentFormData[field.id] ?? "(no value)";
+      return [
+        `Correction: ${field.id}`,
+        `Label: ${field.label}`,
+        `Type: ${typeLabel}`,
+        `Current value: ${currentValue}`,
+        hints,
+        `Previously completed: ${completed}`,
+        "",
+        "The user wants to correct this value. Ask them for the updated value.",
+      ].join("\n");
+    }
+
+    return [
+      `Next field: ${field.id}`,
+      `Label: ${field.label}`,
+      `Type: ${typeLabel}`,
+      hints,
+      `Previously completed: ${completed}`,
+      "",
+      "Ask the user for this value.",
+    ].join("\n");
+  }
+
+  function buildResumeText(field: FieldDefinition, currentFormData: SnapFormData): string {
+    const completed = completedFieldsSummary(currentFormData);
+    const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
+    const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
+
+    return [
+      `Resuming: ${field.id}`,
+      `Label: ${field.label}`,
+      `Type: ${typeLabel}`,
+      hints,
+      `Previously completed: ${completed}`,
+      "",
+      "A correction was just completed. Continue collecting this field from where you left off.",
+    ].join("\n");
+  }
+
+  // sendFieldMessage — only used for the welcome→asking transition (via sendClientContent).
+  // Tool handlers use buildFieldText/buildResumeText and embed the text in the tool response
+  // to avoid the race where Gemini generates before processing a separate sendClientContent.
   const sendFieldMessage = useCallback(
     (field: FieldDefinition, isCorrection: boolean, currentFormData: SnapFormData) => {
       const session = sessionRef.current;
       if (!session) return;
 
-      const completed = completedFieldsSummary(currentFormData);
-      const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
-      const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
-
-      let text: string;
-      if (isCorrection) {
-        const currentValue = currentFormData[field.id] ?? "(no value)";
-        text = [
-          `Correction: ${field.id}`,
-          `Label: ${field.label}`,
-          `Type: ${typeLabel}`,
-          `Current value: ${currentValue}`,
-          hints,
-          `Previously completed: ${completed}`,
-          "",
-          "The user wants to correct this value. Ask them for the updated value.",
-        ].join("\n");
-      } else {
-        text = [
-          `Next field: ${field.id}`,
-          `Label: ${field.label}`,
-          `Type: ${typeLabel}`,
-          hints,
-          `Previously completed: ${completed}`,
-          "",
-          "Ask the user for this value.",
-        ].join("\n");
-      }
-
       session.sendClientContent({
-        turns: [{ role: "user", parts: [{ text }] }],
+        turns: [{ role: "user", parts: [{ text: buildFieldText(field, isCorrection, currentFormData) }] }],
         turnComplete: true,
       });
     },
     []
   );
 
-  const sendResumeFieldMessage = useCallback(
-    (field: FieldDefinition, currentFormData: SnapFormData) => {
-      const session = sessionRef.current;
-      if (!session) return;
-
-      const completed = completedFieldsSummary(currentFormData);
-      const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
-      const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
-
-      const text = [
-        `Resuming: ${field.id}`,
-        `Label: ${field.label}`,
-        `Type: ${typeLabel}`,
-        hints,
-        `Previously completed: ${completed}`,
-        "",
-        "A correction was just completed. Continue collecting this field from where you left off.",
-      ].join("\n");
-
-      session.sendClientContent({
-        turns: [{ role: "user", parts: [{ text }] }],
-        turnComplete: true,
-      });
-    },
-    []
-  );
-
+  // Returns the instruction text to embed in the tool response.
+  // Updates state but does NOT send any WebSocket messages — the caller
+  // includes the returned text in the tool response so Gemini has it
+  // atomically before generating.
   const advanceToNextField = useCallback(
-    (fromIndex: number, currentFormData: SnapFormData) => {
+    (fromIndex: number, currentFormData: SnapFormData): string => {
       let nextIndex = fromIndex;
       while (nextIndex < FIELD_ORDER.length) {
         const field = FIELD_ORDER[nextIndex];
@@ -183,19 +182,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
         setFieldState(newState);
         fieldStateRef.current = newState;
         setCurrentQuestion(null);
-        sessionRef.current?.sendClientContent({
-          turns: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: "All fields have been collected. Please summarize everything you've gathered and ask if it all looks correct. If the user confirms, call mark_complete to finish.",
-                },
-              ],
-            },
-          ],
-          turnComplete: true,
-        });
+        return "All fields have been collected. Please summarize everything you've gathered and ask if it all looks correct. If the user confirms, call mark_complete to finish.";
       } else {
         const field = FIELD_ORDER[nextIndex];
         const newState: FieldState = {
@@ -206,10 +193,10 @@ export function useGeminiSession(): UseGeminiSessionReturn {
         setFieldState(newState);
         fieldStateRef.current = newState;
         setCurrentQuestion({ field: field.id, question: field.label });
-        sendFieldMessage(field, false, currentFormData);
+        return buildFieldText(field, false, currentFormData);
       }
     },
-    [sendFieldMessage]
+    []
   );
 
   const handleFunctionCall = useCallback(
@@ -275,6 +262,8 @@ export function useGeminiSession(): UseGeminiSessionReturn {
                 : rawValue;
             const fieldId = currentField?.id;
 
+            let nextInstruction = "ok";
+
             if (fieldId) {
               const updatedFormData = { ...formDataRef.current, [fieldId]: confirmedValue };
               setFormData(updatedFormData);
@@ -297,14 +286,17 @@ export function useGeminiSession(): UseGeminiSessionReturn {
                     field: returnField.id,
                     question: returnField.label,
                   });
-                  sendResumeFieldMessage(returnField, updatedFormData);
+                  nextInstruction = buildResumeText(returnField, updatedFormData);
                 }
               } else {
-                advanceToNextField(fs.currentIndex + 1, updatedFormData);
+                nextInstruction = advanceToNextField(fs.currentIndex + 1, updatedFormData);
               }
             }
 
-            responses.push({ id, name, response: { result: "ok" } });
+            // Embed next field instruction in the tool response so Gemini
+            // has it atomically — avoids the race where a separate
+            // sendClientContent arrives after Gemini starts generating.
+            responses.push({ id, name, response: { result: nextInstruction } });
             break;
           }
 
@@ -348,9 +340,10 @@ export function useGeminiSession(): UseGeminiSessionReturn {
               question: targetField.label,
             });
             setConfirmationPrompt(null);
-            sendFieldMessage(targetField, true, formDataRef.current);
 
-            responses.push({ id, name, response: { result: "ok" } });
+            // Embed correction field instruction in tool response (same race fix as field_complete)
+            const correctionText = buildFieldText(targetField, true, formDataRef.current);
+            responses.push({ id, name, response: { result: correctionText } });
             break;
           }
 
@@ -377,7 +370,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
       return responses;
     },
-    [advanceToNextField, sendFieldMessage, sendResumeFieldMessage]
+    [advanceToNextField]
   );
 
   // Shared cleanup — nulls refs first, then closes resources.
