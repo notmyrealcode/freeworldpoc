@@ -71,7 +71,6 @@ export const FORM_FIELDS: FormField[] = [
 
 export type SnapFormData = Record<string, string>;
 
-export const VALID_FIELD_IDS = new Set(FORM_FIELDS.map((f) => f.id));
 
 export function getFieldsBySection(section: SectionName): FormField[] {
   return FORM_FIELDS.filter((f) => f.section === section);
