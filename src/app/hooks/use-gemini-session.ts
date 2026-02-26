@@ -204,7 +204,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       setError(message);
       console.error("Failed to start session:", err);
     }
-  }, [handleFunctionCall, stopSession]);
+  }, [handleFunctionCall]);
 
   // Cleanup on unmount — prevent WebSocket/mic/AudioContext leaks
   useEffect(() => {

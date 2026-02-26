@@ -34,7 +34,7 @@ function SessionTimer({
       setSeconds((s) => {
         const next = s + 1;
         // Auto-disconnect at 14:30 before Gemini's 15-min hard limit
-        if (next >= 14 * 60 + 30) {
+        if (next === 14 * 60 + 30) {
           onTimeoutRef.current();
         }
         return next;
@@ -120,12 +120,12 @@ export function ConversationPanel({
       {isConnected && (
         <div className="w-full max-w-md h-16 mb-6 flex items-center justify-center">
           <div className="flex items-center gap-1">
-            {Array.from({ length: 5 }).map((_, i) => (
+            {[20, 32, 24, 36, 28].map((h, i) => (
               <div
                 key={i}
                 className="w-1.5 bg-blue-500 rounded-full animate-pulse"
                 style={{
-                  height: `${16 + Math.random() * 24}px`,
+                  height: `${h}px`,
                   animationDelay: `${i * 0.15}s`,
                   animationDuration: "0.8s",
                 }}
