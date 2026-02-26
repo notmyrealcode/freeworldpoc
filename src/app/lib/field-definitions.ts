@@ -1,7 +1,7 @@
 // src/app/lib/field-definitions.ts
 import { maskSSN, type SnapFormData } from "./form-schema";
 
-export type FieldType = "text" | "yes_no" | "optional_text";
+type FieldType = "text" | "yes_no" | "optional_text";
 
 export interface FieldDefinition {
   id: string;
@@ -27,6 +27,7 @@ export const FIELD_ORDER: FieldDefinition[] = [
   { id: "has_different_mailing", label: "Different Mailing Address?", type: "yes_no", required: true,
     hints: "ask if their mailing address is different from their home address" },
   { id: "mailing_address", label: "Mailing Address (Street)", type: "text", required: true,
+    // Values are normalized to "Yes"/"No" by field_complete; toLowerCase is belt-and-suspenders
     skipIf: (data) => data.has_different_mailing?.toLowerCase() === "no" },
   { id: "mailing_city", label: "Mailing City", type: "text", required: true,
     skipIf: (data) => data.has_different_mailing?.toLowerCase() === "no" },

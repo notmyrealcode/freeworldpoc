@@ -5,8 +5,7 @@ import { GoogleGenAI, type LiveServerMessage } from "@google/genai";
 import { GEMINI_MODEL, SESSION_CONFIG } from "@/app/lib/gemini-config";
 import { AudioCapture } from "@/app/lib/audio-capture";
 import { AudioPlayback } from "@/app/lib/audio-playback";
-import { type SnapFormData } from "@/app/lib/form-schema";
-import { maskSSN } from "@/app/lib/form-schema";
+import { maskSSN, type SnapFormData } from "@/app/lib/form-schema";
 import {
   FIELD_ORDER,
   fieldIndex,
@@ -176,11 +175,13 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       }
 
       if (nextIndex >= FIELD_ORDER.length) {
-        setFieldState((prev) => ({
-          ...prev,
+        const newState: FieldState = {
+          ...fieldStateRef.current,
           currentIndex: nextIndex,
           machineState: "summary",
-        }));
+        };
+        setFieldState(newState);
+        fieldStateRef.current = newState;
         setCurrentQuestion(null);
         sessionRef.current?.sendClientContent({
           turns: [
@@ -197,11 +198,13 @@ export function useGeminiSession(): UseGeminiSessionReturn {
         });
       } else {
         const field = FIELD_ORDER[nextIndex];
-        setFieldState((prev) => ({
-          ...prev,
+        const newState: FieldState = {
+          ...fieldStateRef.current,
           currentIndex: nextIndex,
           machineState: "asking",
-        }));
+        };
+        setFieldState(newState);
+        fieldStateRef.current = newState;
         setCurrentQuestion({ field: field.id, question: field.label });
         sendFieldMessage(field, false, currentFormData);
       }
@@ -263,7 +266,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
           case "field_complete": {
             // Normalize yes/no values so skipIf comparisons are consistent
-            const rawValue = args.value;
+            const rawValue = args.value ?? "";
             const confirmedValue =
               currentField?.type === "yes_no"
                 ? rawValue.toLowerCase().startsWith("y")

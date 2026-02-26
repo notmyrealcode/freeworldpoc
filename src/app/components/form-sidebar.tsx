@@ -66,6 +66,7 @@ function SectionStatus({
           const isFieldActive = field.id === activeField;
 
           // Hide mailing address fields if they said "No"
+          // Values are normalized to "Yes"/"No"; toLowerCase is belt-and-suspenders
           if (
             field.section === "Mailing Address" &&
             field.id !== "has_different_mailing" &&

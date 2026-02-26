@@ -14,7 +14,6 @@ export default function Home() {
     formData,
     error,
     voiceStatus,
-    machineState,
     startSession,
     stopSession,
     pauseSession,
