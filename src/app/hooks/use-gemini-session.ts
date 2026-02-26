@@ -224,10 +224,9 @@ export function useGeminiSession(): UseGeminiSessionReturn {
               value: displayValue,
               prompt: args.prompt,
             });
-            setFieldState((prev) => ({
-              ...prev,
-              machineState: "confirming",
-            }));
+            const confirmingState: FieldState = { ...fieldStateRef.current, machineState: "confirming" };
+            setFieldState(confirmingState);
+            fieldStateRef.current = confirmingState;
             responses.push({
               id,
               name,
@@ -252,6 +251,20 @@ export function useGeminiSession(): UseGeminiSessionReturn {
           }
 
           case "field_complete": {
+            // Reject if confirm_value wasn't called first — enforces the
+            // confirmation flow in code rather than relying on prompt compliance.
+            if (fs.machineState !== "confirming") {
+              responses.push({
+                id,
+                name,
+                response: {
+                  result:
+                    "error: you must call confirm_value first to display the value on screen and wait for the user to say yes before calling field_complete.",
+                },
+              });
+              break;
+            }
+
             // Normalize yes/no values so skipIf comparisons are consistent
             const rawValue = args.value ?? "";
             const confirmedValue =
