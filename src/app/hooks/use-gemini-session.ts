@@ -110,7 +110,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
         hints,
         `Previously completed: ${completed}`,
         "",
-        "The user wants to correct this value. Ask them for the updated value.",
+        "The user wants to correct this value. Ask them for the updated value. After they answer, call confirm_value to display it on screen, then WAIT for their yes/no before calling field_complete.",
       ].join("\n");
     }
 
@@ -121,7 +121,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       hints,
       `Previously completed: ${completed}`,
       "",
-      "Ask the user for this value.",
+      "Ask the user for this value. After they answer, call confirm_value to display it on screen, then WAIT for their yes/no before calling field_complete.",
     ].join("\n");
   }
 
@@ -137,7 +137,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       hints,
       `Previously completed: ${completed}`,
       "",
-      "A correction was just completed. Continue collecting this field from where you left off.",
+      "A correction was just completed. Continue collecting this field from where you left off. After they answer, call confirm_value to display it on screen, then WAIT for their yes/no before calling field_complete.",
     ].join("\n");
   }
 
