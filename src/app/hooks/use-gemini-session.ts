@@ -273,6 +273,19 @@ export function useGeminiSession(): UseGeminiSessionReturn {
                   ? "Yes"
                   : "No"
                 : rawValue;
+            // Reject empty values for required fields
+            if (currentField?.required && !confirmedValue.trim()) {
+              responses.push({
+                id,
+                name,
+                response: {
+                  result:
+                    "error: this field is required and cannot be empty. Ask the user to provide a value.",
+                },
+              });
+              break;
+            }
+
             const fieldId = currentField?.id;
 
             let nextInstruction = "ok";
