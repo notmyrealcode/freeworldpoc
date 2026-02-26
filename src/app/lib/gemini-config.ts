@@ -1,4 +1,4 @@
-import { Modality } from "@google/genai";
+import { Modality, Type, type FunctionDeclaration, type LiveConnectConfig } from "@google/genai";
 
 export const GEMINI_MODEL = "gemini-live-2.5-flash-native-audio";
 
@@ -54,16 +54,16 @@ If the person says "go back", "wait", "that's wrong", "fix that", or similar:
 
 After all fields are collected, summarize what you've gathered and ask if everything looks correct. If they confirm, call mark_complete.`;
 
-export const TOOL_DECLARATIONS = [
+export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
     name: "update_field",
     description:
       "Update a form field with a confirmed value. Only call this after the applicant has confirmed the value is correct.",
     parameters: {
-      type: "object",
+      type: Type.OBJECT,
       properties: {
         field: {
-          type: "string",
+          type: Type.STRING,
           enum: [
             "first_name", "middle_name", "last_name", "other_names", "ssn",
             "home_address", "home_city", "home_state", "home_zip",
@@ -77,7 +77,7 @@ export const TOOL_DECLARATIONS = [
           description: "The field ID to update",
         },
         value: {
-          type: "string",
+          type: Type.STRING,
           description: "The confirmed value for the field",
         },
       },
@@ -89,14 +89,14 @@ export const TOOL_DECLARATIONS = [
     description:
       "Update the UI to show which question is currently being asked. Call this when moving to a new field.",
     parameters: {
-      type: "object",
+      type: Type.OBJECT,
       properties: {
         field: {
-          type: "string",
+          type: Type.STRING,
           description: "The field ID being asked about",
         },
         question: {
-          type: "string",
+          type: Type.STRING,
           description:
             "A friendly version of the question to display on screen",
         },
@@ -109,14 +109,14 @@ export const TOOL_DECLARATIONS = [
     description:
       "Mark the form section as complete. Call this after all fields have been collected and the applicant confirms everything is correct.",
     parameters: {
-      type: "object",
+      type: Type.OBJECT,
       properties: {},
       required: [],
     },
   },
 ];
 
-export const SESSION_CONFIG = {
+export const SESSION_CONFIG: LiveConnectConfig = {
   responseModalities: [Modality.AUDIO],
   systemInstruction: SYSTEM_INSTRUCTION,
   tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
