@@ -2,11 +2,11 @@
 
 import {
   FORM_SECTIONS,
-  getFieldsBySection,
   maskSSN,
   type SnapFormData,
   type SectionName,
 } from "@/app/lib/form-schema";
+import { getFieldsBySection } from "@/app/lib/field-definitions";
 
 interface FormSidebarProps {
   formData: SnapFormData;
@@ -23,7 +23,7 @@ function SectionStatus({
   activeField: string | null;
 }) {
   const fields = getFieldsBySection(section);
-  const requiredFields = fields.filter((f) => !f.optional);
+  const requiredFields = fields.filter((f) => f.required);
   const filledRequired = requiredFields.filter((f) => formData[f.id]);
   const isActive = fields.some((f) => f.id === activeField);
 
