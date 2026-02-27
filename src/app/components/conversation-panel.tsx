@@ -1,19 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type {
-  CurrentQuestion,
-  ConfirmationPrompt,
-  VoiceStatus,
-} from "@/app/hooks/use-gemini-session";
+import type { VoiceStatus } from "@/app/hooks/use-gemini-session";
 import { AudioVisualizer } from "./audio-visualizer";
+import { MadlibCard } from "./madlib-card";
+import type { MadlibSection, MadlibConditional } from "@/app/lib/madlib-templates";
+import type { SnapFormData } from "@/app/lib/form-schema";
 
 interface ConversationPanelProps {
   isConnected: boolean;
   isPaused: boolean;
   isComplete: boolean;
-  currentQuestion: CurrentQuestion | null;
-  confirmationPrompt: ConfirmationPrompt | null;
+  activeMadlib: MadlibSection | null;
+  activeConditional: MadlibConditional | null;
+  formData: SnapFormData;
   error: string | null;
   voiceStatus: VoiceStatus;
   getFrequencyData: (() => Uint8Array | null) | null;
@@ -93,8 +93,9 @@ export function ConversationPanel({
   isConnected,
   isPaused,
   isComplete,
-  currentQuestion,
-  confirmationPrompt,
+  activeMadlib,
+  activeConditional,
+  formData,
   error,
   voiceStatus,
   getFrequencyData,
@@ -103,7 +104,6 @@ export function ConversationPanel({
   onPause,
   onResume,
 }: ConversationPanelProps) {
-  console.log("[render] isConnected:", isConnected, "isPaused:", isPaused, "confirmationPrompt:", confirmationPrompt, "currentQuestion:", currentQuestion);
   return (
     <div className="h-full flex flex-col items-center justify-center p-8">
       {/* Current question display */}
@@ -134,26 +134,22 @@ export function ConversationPanel({
           </div>
         )}
 
-        {/* Confirmation card takes precedence over currentQuestion when active */}
-        {isConnected && !isPaused && confirmationPrompt && (
-          <div className="text-center w-full">
-            <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-6 max-w-md mx-auto">
-              <p className="text-sm text-blue-600 font-medium mb-2">
-                Please confirm
-              </p>
-              <p className="text-3xl font-bold text-gray-900 mb-3">
-                {confirmationPrompt.value}
-              </p>
-              <p className="text-gray-600">{confirmationPrompt.prompt}</p>
-            </div>
-          </div>
-        )}
-
-        {isConnected && !isPaused && !confirmationPrompt && currentQuestion && (
-          <div className="text-center">
-            <p className="text-2xl font-medium text-gray-900 leading-relaxed">
-              {currentQuestion.question}
-            </p>
+        {isConnected && !isPaused && activeMadlib && (
+          <div className="w-full max-w-2xl space-y-4">
+            <MadlibCard
+              template={activeMadlib.template}
+              fields={activeMadlib.fields}
+              values={formData}
+              sectionTitle={activeMadlib.section}
+            />
+            {activeConditional && (
+              <MadlibCard
+                template={activeConditional.template}
+                fields={activeConditional.fields}
+                values={formData}
+                sectionTitle={`${activeMadlib.section} (continued)`}
+              />
+            )}
           </div>
         )}
 
