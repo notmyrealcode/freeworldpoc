@@ -587,7 +587,9 @@ export function useGeminiSession(): UseGeminiSessionReturn {
             setError(e.message || "WebSocket connection error");
           },
           onclose: (e: CloseEvent) => {
-            console.error("[session] closed:", e.code, e.reason);
+            if (e.code !== 1000) {
+              console.error("[session] closed unexpectedly:", e.code, e.reason);
+            }
             cleanup();
           },
         },

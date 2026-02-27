@@ -110,9 +110,16 @@ export function ConversationPanel({
       <div className="flex-1 flex items-center justify-center w-full max-w-lg">
         {!isConnected && !isComplete && (
           <div className="text-center">
-            <h2 className="text-2xl font-bold text-gray-900 mb-3">
-              CalFresh Application Assistant
+            <h2 className="text-3xl font-bold text-gray-900">
+              SNAP Apply
             </h2>
+            <p className="text-xl font-semibold text-gray-500 mt-1 mb-2">By</p>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/freeworld-logo.svg"
+              alt="FreeWorld"
+              className="h-5 mx-auto mb-6"
+            />
             <p className="text-gray-600">
               Click the button below to start a voice conversation. The
               assistant will guide you through the application questions.
