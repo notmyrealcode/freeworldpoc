@@ -5,24 +5,13 @@ import { GoogleGenAI, type LiveServerMessage } from "@google/genai";
 import { GEMINI_MODEL, SESSION_CONFIG } from "@/app/lib/gemini-config";
 import { AudioCapture } from "@/app/lib/audio-capture";
 import { AudioPlayback } from "@/app/lib/audio-playback";
-import { maskSSN, type SnapFormData } from "@/app/lib/form-schema";
+import { type SnapFormData } from "@/app/lib/form-schema";
 import {
-  FIELD_ORDER,
-  fieldIndex,
-  completedFieldsSummary,
-  type FieldDefinition,
-} from "@/app/lib/field-definitions";
-
-export interface CurrentQuestion {
-  field: string;
-  question: string;
-}
-
-export interface ConfirmationPrompt {
-  field: string;
-  value: string;
-  prompt: string;
-}
+  MADLIB_SECTIONS,
+  getSectionFieldIds,
+  type MadlibSection,
+  type MadlibConditional,
+} from "@/app/lib/madlib-templates";
 
 // Voice activity states for the UI:
 //   "listening"   — model's turn is complete, waiting for user input
@@ -30,27 +19,26 @@ export interface ConfirmationPrompt {
 //   "speaking"    — model audio is playing
 export type VoiceStatus = "listening" | "processing" | "speaking";
 
-type FieldMachineState =
+type SectionMachineState =
   | "idle"
   | "welcome"
-  | "asking"
-  | "confirming"
-  | "correcting"
+  | "prompting"
+  | "reviewing"
+  | "conditional"
   | "summary"
   | "done";
 
-interface FieldState {
-  currentIndex: number;
-  returnToIndex: number | null;
-  machineState: FieldMachineState;
+interface SectionState {
+  currentSectionIndex: number;
+  machineState: SectionMachineState;
 }
 
 interface UseGeminiSessionReturn {
   isConnected: boolean;
   isPaused: boolean;
   isComplete: boolean;
-  currentQuestion: CurrentQuestion | null;
-  confirmationPrompt: ConfirmationPrompt | null;
+  activeMadlib: MadlibSection | null;
+  activeConditional: MadlibConditional | null;
   formData: SnapFormData;
   error: string | null;
   voiceStatus: VoiceStatus;
@@ -61,27 +49,64 @@ interface UseGeminiSessionReturn {
   resumeSession: () => void;
 }
 
+// --- Pure helper: build the text instruction sent to Gemini for a section ---
+
+function buildSectionInstruction(
+  section: MadlibSection,
+  conditional?: MadlibConditional,
+): string {
+  const template = conditional?.template ?? section.template;
+  const fields = conditional?.fields ?? section.fields;
+
+  const lines = [
+    conditional
+      ? `Follow-up for: ${section.section}`
+      : `Section: ${section.section}`,
+    `Template: "${template}"`,
+    "",
+    "Fields:",
+  ];
+
+  for (const f of fields) {
+    const req = f.required ? "required" : "optional";
+    const hint = f.hints ? ` (${f.hints})` : "";
+    lines.push(`  - ${f.id}: "${f.label}" [${req}]${hint}`);
+  }
+
+  if (!conditional && section.conditionals) {
+    lines.push("");
+    lines.push("Conditional follow-ups:");
+    for (const cond of section.conditionals) {
+      lines.push(
+        `  - If ${cond.triggerField} matches "${cond.triggerValue}", a follow-up will appear. Handle it before calling next_section.`,
+      );
+    }
+  }
+
+  return lines.join("\n");
+}
+
 export function useGeminiSession(): UseGeminiSessionReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
-  const [currentQuestion, setCurrentQuestion] =
-    useState<CurrentQuestion | null>(null);
-  const [confirmationPrompt, setConfirmationPrompt] =
-    useState<ConfirmationPrompt | null>(null);
   const [formData, setFormData] = useState<SnapFormData>({});
   const [error, setError] = useState<string | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("listening");
 
-  const [fieldState, setFieldState] = useState<FieldState>({
-    currentIndex: 0,
-    returnToIndex: null,
+  const [sectionState, setSectionState] = useState<SectionState>({
+    currentSectionIndex: 0,
     machineState: "idle",
   });
-  const fieldStateRef = useRef<FieldState>(fieldState);
-  fieldStateRef.current = fieldState;
+  const sectionStateRef = useRef<SectionState>(sectionState);
+  sectionStateRef.current = sectionState;
   const formDataRef = useRef<SnapFormData>(formData);
   formDataRef.current = formData;
+
+  const [activeMadlib, setActiveMadlib] = useState<MadlibSection | null>(null);
+  const [activeConditional, setActiveConditional] =
+    useState<MadlibConditional | null>(null);
+  const activeConditionalRef = useRef<MadlibConditional | null>(null);
 
   const sessionRef = useRef<Awaited<
     ReturnType<InstanceType<typeof GoogleGenAI>["live"]["connect"]>
@@ -93,132 +118,16 @@ export function useGeminiSession(): UseGeminiSessionReturn {
   // Track paused state in a ref so the onmessage closure can check it
   const pausedRef = useRef(false);
 
-  // --- Pure text builders (no side effects, no WebSocket sends) ---
-
-  function buildFieldText(field: FieldDefinition, isCorrection: boolean, currentFormData: SnapFormData): string {
-    const completed = completedFieldsSummary(currentFormData);
-    const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
-    const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
-    const completedCount = FIELD_ORDER.filter(f => currentFormData[f.id] !== undefined).length;
-    const totalCount = FIELD_ORDER.filter(f => !f.skipIf || !f.skipIf(currentFormData)).length;
-    const progress = `Progress: ${completedCount}/${totalCount} fields done. Do NOT summarize until the system says all fields are done.`;
-
-    const isYesNo = field.type === "yes_no";
-    const isOptional = !field.required;
-    const toolInstruction = isYesNo
-      ? "Ask the user this yes/no question. After they answer, call field_complete directly with \"Yes\" or \"No\". Do NOT call confirm_value for yes/no questions."
-      : isOptional
-        ? "Ask the user for this value. If they say they don't have one, say \"no\", or want to skip, call field_complete with \"SKIP\". Otherwise, call confirm_value with their answer."
-        : "Ask the user for this value. After they answer, you MUST call the confirm_value function tool — do NOT just say the value back verbally.";
-
-    if (isCorrection) {
-      const currentValue = currentFormData[field.id] ?? "(no value)";
-      return [
-        `Correction: ${field.id}`,
-        `Label: ${field.label}`,
-        `Type: ${typeLabel}`,
-        `Current value: ${currentValue}`,
-        hints,
-        `Previously completed: ${completed}`,
-        progress,
-        "",
-        `The user wants to correct this value. Ask them for the updated value. ${isYesNo ? 'Call field_complete directly with "Yes" or "No".' : "You MUST call the confirm_value function tool — do NOT just say the value back verbally."}`,
-      ].join("\n");
-    }
-
-    return [
-      `Next field: ${field.id}`,
-      `Label: ${field.label}`,
-      `Type: ${typeLabel}`,
-      hints,
-      `Previously completed: ${completed}`,
-      progress,
-      "",
-      toolInstruction,
-    ].join("\n");
-  }
-
-  function buildResumeText(field: FieldDefinition, currentFormData: SnapFormData): string {
-    const completed = completedFieldsSummary(currentFormData);
-    const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
-    const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
-
-    const isYesNo = field.type === "yes_no";
-    return [
-      `Resuming: ${field.id}`,
-      `Label: ${field.label}`,
-      `Type: ${typeLabel}`,
-      hints,
-      `Previously completed: ${completed}`,
-      "",
-      isYesNo
-        ? "A correction was just completed. Continue collecting this yes/no question. Call field_complete directly with \"Yes\" or \"No\"."
-        : "A correction was just completed. Continue collecting this field from where you left off. After they answer, you MUST call the confirm_value function tool — do NOT just say the value back verbally.",
-    ].join("\n");
-  }
-
-  // sendFieldMessage — only used for the welcome→asking transition (via sendClientContent).
-  // Tool handlers use buildFieldText/buildResumeText and embed the text in the tool response
-  // to avoid the race where Gemini generates before processing a separate sendClientContent.
-  const sendFieldMessage = useCallback(
-    (field: FieldDefinition, isCorrection: boolean, currentFormData: SnapFormData) => {
-      const session = sessionRef.current;
-      if (!session) return;
-
-      const fieldText = buildFieldText(field, isCorrection, currentFormData);
-      console.log("[sendFieldMessage]", fieldText);
-      session.sendClientContent({
-        turns: [{ role: "user", parts: [{ text: fieldText }] }],
-        turnComplete: true,
-      });
-    },
-    []
-  );
-
-  // Returns the instruction text to embed in the tool response.
-  // Updates state but does NOT send any WebSocket messages — the caller
-  // includes the returned text in the tool response so Gemini has it
-  // atomically before generating.
-  const advanceToNextField = useCallback(
-    (fromIndex: number, currentFormData: SnapFormData): string => {
-      let nextIndex = fromIndex;
-      while (nextIndex < FIELD_ORDER.length) {
-        const field = FIELD_ORDER[nextIndex];
-        if (field.skipIf && field.skipIf(currentFormData)) {
-          nextIndex++;
-          continue;
-        }
-        break;
-      }
-
-      if (nextIndex >= FIELD_ORDER.length) {
-        const newState: FieldState = {
-          ...fieldStateRef.current,
-          currentIndex: nextIndex,
-          machineState: "summary",
-        };
-        setFieldState(newState);
-        fieldStateRef.current = newState;
-        setCurrentQuestion(null);
-        return "All fields have been collected. Please summarize everything you've gathered and ask if it all looks correct. If the user confirms, call mark_complete to finish.";
-      } else {
-        const field = FIELD_ORDER[nextIndex];
-        const newState: FieldState = {
-          ...fieldStateRef.current,
-          currentIndex: nextIndex,
-          machineState: "asking",
-        };
-        setFieldState(newState);
-        fieldStateRef.current = newState;
-        setCurrentQuestion({ field: field.id, question: field.label });
-        return buildFieldText(field, false, currentFormData);
-      }
-    },
-    []
-  );
+  // --- Tool handler ---
 
   const handleFunctionCall = useCallback(
-    (functionCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>) => {
+    (
+      functionCalls: Array<{
+        id?: string;
+        name?: string;
+        args?: Record<string, unknown>;
+      }>,
+    ) => {
       const responses: Array<{
         id: string;
         name: string;
@@ -226,28 +135,90 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       }> = [];
 
       for (const fc of functionCalls) {
-        const args = (fc.args ?? {}) as Record<string, string>;
+        const args = (fc.args ?? {}) as Record<string, unknown>;
         const id = fc.id ?? "";
         const name = fc.name ?? "";
-        const fs = fieldStateRef.current;
-        const currentField = FIELD_ORDER[fs.currentIndex];
+        const ss = sectionStateRef.current;
+        const currentSection = MADLIB_SECTIONS[ss.currentSectionIndex];
 
         switch (name) {
-          case "confirm_value": {
-            console.log("[confirm_value] field:", currentField?.id, "value:", args.value, "prompt:", args.prompt, "machineState:", fs.machineState);
-            // Mask SSN on screen as defense-in-depth (Gemini should only send last 4, but just in case)
-            const displayValue =
-              currentField?.id === "ssn" ? maskSSN(args.value) : args.value;
-            setConfirmationPrompt({
-              field: currentField?.id ?? "",
-              value: displayValue,
-              prompt: args.prompt,
-            });
-            console.log("[confirm_value] setConfirmationPrompt called with:", { field: currentField?.id, value: displayValue, prompt: args.prompt });
-            const confirmingState: FieldState = { ...fieldStateRef.current, machineState: "confirming" };
-            setFieldState(confirmingState);
-            fieldStateRef.current = confirmingState;
-            console.log("[confirm_value] state → confirming, fieldStateRef:", fieldStateRef.current);
+          case "complete_section": {
+            const fieldsMap = (args.fields ?? {}) as Record<string, string>;
+            console.log(
+              "[complete_section]",
+              fieldsMap,
+              "machineState:",
+              ss.machineState,
+            );
+
+            // Merge all values into formData
+            const updatedFormData = { ...formDataRef.current };
+            const targetFields = activeConditionalRef.current
+              ? activeConditionalRef.current.fields
+              : currentSection?.fields ?? [];
+
+            for (const f of targetFields) {
+              const val = fieldsMap[f.id] ?? "";
+              if (val || !f.required) {
+                updatedFormData[f.id] = val;
+              }
+            }
+            setFormData(updatedFormData);
+            formDataRef.current = updatedFormData;
+
+            // Check for conditionals
+            if (
+              currentSection &&
+              !activeConditionalRef.current &&
+              currentSection.conditionals
+            ) {
+              for (const cond of currentSection.conditionals) {
+                const triggerVal = updatedFormData[cond.triggerField] ?? "";
+                // Normalize: "is"/"yes" trigger, "do"/"yes" trigger
+                const normalized = triggerVal.toLowerCase();
+                const condValue = cond.triggerValue.toLowerCase();
+                const matches =
+                  normalized === condValue ||
+                  (normalized === "yes" &&
+                    ["is", "do", "have", "am"].includes(condValue)) ||
+                  (condValue === "yes" &&
+                    ["is", "do", "have", "am"].includes(normalized));
+
+                if (matches) {
+                  setActiveConditional(cond);
+                  activeConditionalRef.current = cond;
+                  const newState: SectionState = {
+                    ...ss,
+                    machineState: "conditional",
+                  };
+                  setSectionState(newState);
+                  sectionStateRef.current = newState;
+
+                  const conditionalInstruction = buildSectionInstruction(
+                    currentSection,
+                    cond,
+                  );
+                  responses.push({
+                    id,
+                    name,
+                    response: { result: conditionalInstruction },
+                  });
+                  // Early return — skip further processing
+                  return responses;
+                }
+              }
+            }
+
+            // No conditional triggered (or already handling conditional) — go to reviewing
+            const newState: SectionState = {
+              ...ss,
+              machineState: "reviewing",
+            };
+            setSectionState(newState);
+            sectionStateRef.current = newState;
+            setActiveConditional(null);
+            activeConditionalRef.current = null;
+
             responses.push({
               id,
               name,
@@ -255,172 +226,127 @@ export function useGeminiSession(): UseGeminiSessionReturn {
                 result: "OK. Do not speak. Wait for the user's response.",
               },
             });
-            // Send error responses for any remaining batched tool calls so Gemini doesn't hang
-            for (let j = functionCalls.indexOf(fc) + 1; j < functionCalls.length; j++) {
-              const dropped = functionCalls[j];
-              responses.push({
-                id: dropped.id ?? "",
-                name: dropped.name ?? "",
-                response: {
-                  result:
-                    "PROTOCOL VIOLATION: This tool call was batched with confirm_value. You are in CONFIRMATION MODE — wait for the user's verbal response before taking any further action.",
-                },
-              });
-            }
-            return responses;
-          }
-
-          case "field_complete": {
-            console.log("[field_complete] field:", currentField?.id, "value:", args.value, "machineState:", fs.machineState);
-            // Yes/no fields and optional skips bypass confirmation — allow field_complete from asking/correcting state
-            const isYesNo = currentField?.type === "yes_no";
-            const isSkip = (args.value ?? "").toUpperCase() === "SKIP";
-            const canSkipConfirmation = isYesNo || isSkip;
-            const allowedStates: FieldMachineState[] = canSkipConfirmation
-              ? ["asking", "correcting", "confirming"]
-              : ["confirming"];
-            if (!allowedStates.includes(fs.machineState)) {
-              console.warn("[field_complete] BLOCKED — machineState is", fs.machineState, "not in", allowedStates);
-              responses.push({
-                id,
-                name,
-                response: {
-                  result: canSkipConfirmation
-                    ? "PROTOCOL VIOLATION: field_complete called in wrong state. You should be in COLLECTION MODE."
-                    : "PROTOCOL VIOLATION: field_complete was called before the value was confirmed. You are still in COLLECTION MODE. You must first call confirm_value to display the value on the applicant's screen, then ask if it looks correct, and wait for their verbal yes. Only after they confirm can you call field_complete. (For optional fields the user wants to skip, call field_complete with value \"SKIP\".)",
-                },
-              });
-              break;
-            }
-
-            // Normalize values
-            const rawValue = args.value ?? "";
-            const skipped = rawValue.toUpperCase() === "SKIP";
-            const confirmedValue = skipped
-              ? ""
-              : currentField?.type === "yes_no"
-                ? rawValue.toLowerCase().startsWith("y")
-                  ? "Yes"
-                  : "No"
-                : rawValue;
-            // Reject empty values for required fields (skips on required fields are blocked)
-            if (currentField?.required && !confirmedValue.trim()) {
-              responses.push({
-                id,
-                name,
-                response: {
-                  result:
-                    "error: this field is required and cannot be empty. Ask the user to provide a value.",
-                },
-              });
-              break;
-            }
-
-            const fieldId = currentField?.id;
-
-            let nextInstruction = "ok";
-
-            if (fieldId) {
-              const updatedFormData = { ...formDataRef.current, [fieldId]: confirmedValue };
-              setFormData(updatedFormData);
-              formDataRef.current = updatedFormData;
-
-              setConfirmationPrompt(null);
-
-              if (fs.returnToIndex !== null) {
-                const returnIdx = fs.returnToIndex;
-                const newState: FieldState = {
-                  currentIndex: returnIdx,
-                  returnToIndex: null,
-                  machineState: "asking",
-                };
-                setFieldState(newState);
-                fieldStateRef.current = newState;
-                const returnField = FIELD_ORDER[returnIdx];
-                if (returnField) {
-                  setCurrentQuestion({
-                    field: returnField.id,
-                    question: returnField.label,
-                  });
-                  nextInstruction = buildResumeText(returnField, updatedFormData);
-                }
-              } else {
-                nextInstruction = advanceToNextField(fs.currentIndex + 1, updatedFormData);
-              }
-            }
-
-            // Embed next field instruction in the tool response so Gemini
-            // has it atomically — avoids the race where a separate
-            // sendClientContent arrives after Gemini starts generating.
-            responses.push({ id, name, response: { result: nextInstruction } });
             break;
           }
 
-          case "request_correction": {
-            const targetFieldId = args.field_id;
-            const targetIndex = fieldIndex(targetFieldId);
+          case "fix_field": {
+            const fieldId = args.field_id as string;
+            const value = args.value as string;
+            console.log(
+              "[fix_field]",
+              fieldId,
+              "=",
+              value,
+              "machineState:",
+              ss.machineState,
+            );
 
-            if (targetIndex === -1) {
+            // Validate field belongs to current section
+            const allFieldIds = currentSection
+              ? getSectionFieldIds(currentSection)
+              : [];
+            if (!allFieldIds.includes(fieldId)) {
               responses.push({
                 id,
                 name,
                 response: {
-                  result: `error: unknown field "${targetFieldId}". Ask the user to clarify which field they want to correct.`,
+                  result: `error: unknown field "${fieldId}" in current section. Valid fields: ${allFieldIds.join(", ")}`,
                 },
               });
               break;
             }
 
-            if (!formDataRef.current[targetFieldId]) {
-              responses.push({
-                id,
-                name,
-                response: {
-                  result: `Field "${targetFieldId}" hasn't been filled yet. Ask the user which completed field they want to correct.`,
-                },
-              });
-              break;
-            }
-
-            const newState: FieldState = {
-              currentIndex: targetIndex,
-              returnToIndex: fs.returnToIndex === null ? fs.currentIndex : fs.returnToIndex,
-              machineState: "correcting",
+            const updatedFormData = {
+              ...formDataRef.current,
+              [fieldId]: value,
             };
-            setFieldState(newState);
-            fieldStateRef.current = newState;
+            setFormData(updatedFormData);
+            formDataRef.current = updatedFormData;
 
-            const targetField = FIELD_ORDER[targetIndex];
-            setCurrentQuestion({
-              field: targetField.id,
-              question: targetField.label,
+            responses.push({
+              id,
+              name,
+              response: {
+                result: "OK. Do not speak. Wait for the user's response.",
+              },
             });
-            setConfirmationPrompt(null);
+            break;
+          }
 
-            // Embed correction field instruction in tool response (same race fix as field_complete)
-            const correctionText = buildFieldText(targetField, true, formDataRef.current);
-            responses.push({ id, name, response: { result: correctionText } });
+          case "next_section": {
+            console.log("[next_section] machineState:", ss.machineState);
+            if (ss.machineState !== "reviewing") {
+              responses.push({
+                id,
+                name,
+                response: {
+                  result:
+                    "PROTOCOL VIOLATION: next_section is only valid in reviewing state. Wait for the user to confirm the section looks correct.",
+                },
+              });
+              break;
+            }
+
+            const nextIdx = ss.currentSectionIndex + 1;
+            if (nextIdx >= MADLIB_SECTIONS.length) {
+              // All sections done — go to summary
+              const newState: SectionState = {
+                currentSectionIndex: nextIdx,
+                machineState: "summary",
+              };
+              setSectionState(newState);
+              sectionStateRef.current = newState;
+              setActiveMadlib(null);
+              setActiveConditional(null);
+              activeConditionalRef.current = null;
+
+              responses.push({
+                id,
+                name,
+                response: {
+                  result:
+                    "All sections complete. Please briefly summarize what was collected and ask if everything looks correct. If the user confirms, call mark_complete.",
+                },
+              });
+            } else {
+              // Advance to next section
+              const nextSection = MADLIB_SECTIONS[nextIdx];
+              const newState: SectionState = {
+                currentSectionIndex: nextIdx,
+                machineState: "prompting",
+              };
+              setSectionState(newState);
+              sectionStateRef.current = newState;
+              setActiveMadlib(nextSection);
+              setActiveConditional(null);
+              activeConditionalRef.current = null;
+
+              const instruction = buildSectionInstruction(nextSection);
+              responses.push({
+                id,
+                name,
+                response: { result: instruction },
+              });
+            }
             break;
           }
 
           case "mark_complete": {
-            if (fs.machineState !== "summary") {
+            if (ss.machineState !== "summary") {
               responses.push({
                 id,
                 name,
                 response: {
                   result:
-                    "PROTOCOL VIOLATION: mark_complete is only valid after all fields have been collected and summarized. Continue collecting fields.",
+                    "PROTOCOL VIOLATION: mark_complete is only valid after all sections have been completed and summarized.",
                 },
               });
               break;
             }
-            setFieldState((prev) => ({
-              ...prev,
-              machineState: "done",
-            }));
+            const newState: SectionState = { ...ss, machineState: "done" };
+            setSectionState(newState);
+            sectionStateRef.current = newState;
             setIsComplete(true);
-            setConfirmationPrompt(null);
             responses.push({ id, name, response: { result: "ok" } });
             break;
           }
@@ -437,7 +363,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
       return responses;
     },
-    [advanceToNextField]
+    [],
   );
 
   // Shared cleanup — nulls refs first, then closes resources.
@@ -459,11 +385,11 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     setVoiceStatus("listening");
     aiSpeakingRef.current = false;
     pausedRef.current = false;
-    setFieldState({
-      currentIndex: 0,
-      returnToIndex: null,
-      machineState: "idle",
-    });
+    setSectionState({ currentSectionIndex: 0, machineState: "idle" });
+    sectionStateRef.current = { currentSectionIndex: 0, machineState: "idle" };
+    setActiveMadlib(null);
+    setActiveConditional(null);
+    activeConditionalRef.current = null;
   }, []);
 
   const pauseSession = useCallback(() => {
@@ -502,8 +428,6 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       setError(null);
       setIsComplete(false);
       // Preserve existing formData — don't reset on reconnect
-      setCurrentQuestion(null);
-      setConfirmationPrompt(null);
 
       // 1. Get ephemeral token
       const tokenRes = await fetch("/api/token", { method: "POST" });
@@ -513,7 +437,10 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       const { token } = await tokenRes.json();
 
       // 2. Create GenAI client with ephemeral token (v1alpha required for ephemeral tokens)
-      const ai = new GoogleGenAI({ apiKey: token, httpOptions: { apiVersion: "v1alpha" } });
+      const ai = new GoogleGenAI({
+        apiKey: token,
+        httpOptions: { apiVersion: "v1alpha" },
+      });
 
       // 3. Set up audio playback with speaking state callback
       const playback = new AudioPlayback((playing: boolean) => {
@@ -528,7 +455,10 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       audioPlaybackRef.current = playback;
 
       // 4. Connect to Gemini Live API
-      console.log("[session] connecting with config:", JSON.stringify(SESSION_CONFIG, null, 2));
+      console.log(
+        "[session] connecting with config:",
+        JSON.stringify(SESSION_CONFIG, null, 2),
+      );
       const session = await ai.live.connect({
         model: GEMINI_MODEL,
         config: SESSION_CONFIG,
@@ -538,9 +468,25 @@ export function useGeminiSession(): UseGeminiSessionReturn {
           },
           onmessage: (message: LiveServerMessage) => {
             // Log message types (skip audio data to avoid console spam)
-            const msgTypes = Object.keys(message).filter(k => k !== 'serverContent' || !message.serverContent?.modelTurn);
-            if (msgTypes.length > 0 || message.serverContent?.turnComplete || message.toolCall) {
-              console.log("[ws-msg]", message.toolCall ? "toolCall" : message.serverContent?.turnComplete ? "turnComplete" : message.serverContent?.modelTurn ? "audio" : JSON.stringify(message).slice(0, 200));
+            const msgTypes = Object.keys(message).filter(
+              (k) =>
+                k !== "serverContent" || !message.serverContent?.modelTurn,
+            );
+            if (
+              msgTypes.length > 0 ||
+              message.serverContent?.turnComplete ||
+              message.toolCall
+            ) {
+              console.log(
+                "[ws-msg]",
+                message.toolCall
+                  ? "toolCall"
+                  : message.serverContent?.turnComplete
+                    ? "turnComplete"
+                    : message.serverContent?.modelTurn
+                      ? "audio"
+                      : JSON.stringify(message).slice(0, 200),
+              );
             }
             // Discard incoming data while paused so the session doesn't
             // advance to questions the user never heard
@@ -565,39 +511,37 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
             // Model turn complete — back to listening
             if (message.serverContent?.turnComplete) {
-              console.log("[turnComplete] machineState:", fieldStateRef.current.machineState, "isPlaying:", playback.isPlaying, "aiSpeaking:", aiSpeakingRef.current);
+              console.log(
+                "[turnComplete] machineState:",
+                sectionStateRef.current.machineState,
+                "isPlaying:",
+                playback.isPlaying,
+                "aiSpeaking:",
+                aiSpeakingRef.current,
+              );
 
-              // After welcome turn completes, send the first field
-              // Skip setting "listening" — go straight to "processing" since we're
-              // immediately sending the first field instruction
-              const fs = fieldStateRef.current;
-              if (fs.machineState === "welcome") {
-                // Stay in "processing" (or "speaking") — don't flash "listening"
+              // After welcome turn completes, send the first section
+              const ss = sectionStateRef.current;
+              if (ss.machineState === "welcome") {
                 setVoiceStatus("processing");
-                aiSpeakingRef.current = true; // suppress mic until first question audio arrives
+                aiSpeakingRef.current = true;
 
-                fieldStateRef.current = { ...fs, machineState: "asking" };
+                const firstSection = MADLIB_SECTIONS[0];
+                const newState: SectionState = {
+                  currentSectionIndex: 0,
+                  machineState: "prompting",
+                };
+                setSectionState(newState);
+                sectionStateRef.current = newState;
+                setActiveMadlib(firstSection);
 
-                const currentFormData = formDataRef.current;
-                let firstIdx = 0;
-                while (firstIdx < FIELD_ORDER.length) {
-                  const f = FIELD_ORDER[firstIdx];
-                  if (f.skipIf && f.skipIf(currentFormData)) {
-                    firstIdx++;
-                    continue;
-                  }
-                  break;
-                }
-                if (firstIdx < FIELD_ORDER.length) {
-                  const field = FIELD_ORDER[firstIdx];
-                  setFieldState({
-                    currentIndex: firstIdx,
-                    returnToIndex: null,
-                    machineState: "asking",
-                  });
-                  setCurrentQuestion({ field: field.id, question: field.label });
-                  sendFieldMessage(field, false, currentFormData);
-                }
+                const instruction = buildSectionInstruction(firstSection);
+                session.sendClientContent({
+                  turns: [
+                    { role: "user", parts: [{ text: instruction }] },
+                  ],
+                  turnComplete: true,
+                });
               } else {
                 // Normal turn complete — back to listening
                 if (!playback.isPlaying) {
@@ -608,18 +552,38 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
             // Handle function calls — use ref to avoid sending on dead socket
             if (message.toolCall?.functionCalls) {
-              console.log("[tool-call] received:", message.toolCall.functionCalls.map(fc => `${fc.name}(${JSON.stringify(fc.args)})`).join(", "));
+              console.log(
+                "[tool-call] received:",
+                message.toolCall.functionCalls
+                  .map(
+                    (fc) => `${fc.name}(${JSON.stringify(fc.args)})`,
+                  )
+                  .join(", "),
+              );
               setVoiceStatus("processing");
               aiSpeakingRef.current = false; // tool calls don't produce audio
-              const responses = handleFunctionCall(message.toolCall.functionCalls);
-              console.log("[tool-call] responses:", responses.map(r => `${r.name} → ${r.response.result.slice(0, 80)}`).join(", "));
+              const responses = handleFunctionCall(
+                message.toolCall.functionCalls,
+              );
+              console.log(
+                "[tool-call] responses:",
+                responses
+                  .map(
+                    (r) =>
+                      `${r.name} → ${r.response.result.slice(0, 80)}`,
+                  )
+                  .join(", "),
+              );
               sessionRef.current?.sendToolResponse({
                 functionResponses: responses,
               });
             }
           },
           onerror: (e: ErrorEvent) => {
-            console.error("Gemini session error:", e.message || e.error || e);
+            console.error(
+              "Gemini session error:",
+              e.message || e.error || e,
+            );
             setError(e.message || "WebSocket connection error");
           },
           onclose: (e: CloseEvent) => {
@@ -633,18 +597,20 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
       // 5. Kick off the conversation before starting mic capture —
       //    sending text and audio simultaneously confuses Gemini's turn-taking
-      setFieldState({
-        currentIndex: 0,
-        returnToIndex: null,
+      setSectionState({ currentSectionIndex: 0, machineState: "welcome" });
+      sectionStateRef.current = {
+        currentSectionIndex: 0,
         machineState: "welcome",
-      });
+      };
 
       try {
         session.sendClientContent({
           turns: [
             {
               role: "user",
-              parts: [{ text: "Hi, I'm ready to start the application." }],
+              parts: [
+                { text: "Hi, I'm ready to start the application." },
+              ],
             },
           ],
           turnComplete: true,
@@ -685,7 +651,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       cleanup();
       session?.close();
     }
-  }, [handleFunctionCall, cleanup, sendFieldMessage]);
+  }, [handleFunctionCall, cleanup]);
 
   // Cleanup on unmount — prevent WebSocket/mic/AudioContext leaks
   useEffect(() => {
@@ -704,8 +670,8 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     isConnected,
     isPaused,
     isComplete,
-    currentQuestion,
-    confirmationPrompt,
+    activeMadlib,
+    activeConditional,
     formData,
     error,
     voiceStatus,
