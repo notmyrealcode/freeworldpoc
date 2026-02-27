@@ -10,22 +10,22 @@ import { getFieldsBySection } from "@/app/lib/field-definitions";
 
 interface FormSidebarProps {
   formData: SnapFormData;
-  activeField: string | null;
+  activeSection: SectionName | null;
 }
 
 function SectionStatus({
   section,
   formData,
-  activeField,
+  activeSection,
 }: {
   section: SectionName;
   formData: SnapFormData;
-  activeField: string | null;
+  activeSection: SectionName | null;
 }) {
   const fields = getFieldsBySection(section);
   const requiredFields = fields.filter((f) => f.required);
   const filledRequired = requiredFields.filter((f) => formData[f.id]);
-  const isActive = fields.some((f) => f.id === activeField);
+  const isActive = section === activeSection;
 
   let status: "complete" | "active" | "pending";
   if (filledRequired.length === requiredFields.length && requiredFields.length > 0) {
@@ -63,7 +63,6 @@ function SectionStatus({
       <div className="ml-7 space-y-1">
         {fields.map((field) => {
           const value = formData[field.id];
-          const isFieldActive = field.id === activeField;
 
           // Hide fields whose skip condition is met (e.g. mailing address when same as home)
           if (field.skipIf && field.skipIf(formData)) {
@@ -77,9 +76,7 @@ function SectionStatus({
           return (
             <div
               key={field.id}
-              className={`flex items-baseline gap-2 text-sm ${
-                isFieldActive ? "bg-blue-50 -mx-2 px-2 py-0.5 rounded" : ""
-              }`}
+              className="flex items-baseline gap-2 text-sm"
             >
               <span className="text-gray-500 min-w-[140px] shrink-0">
                 {field.label}:
@@ -101,7 +98,7 @@ function SectionStatus({
   );
 }
 
-export function FormSidebar({ formData, activeField }: FormSidebarProps) {
+export function FormSidebar({ formData, activeSection }: FormSidebarProps) {
   const filledCount = Object.keys(formData).length;
 
   return (
@@ -120,7 +117,7 @@ export function FormSidebar({ formData, activeField }: FormSidebarProps) {
             key={section}
             section={section}
             formData={formData}
-            activeField={activeField}
+            activeSection={activeSection}
           />
         ))}
       </div>

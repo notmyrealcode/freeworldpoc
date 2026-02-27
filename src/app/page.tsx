@@ -9,8 +9,8 @@ export default function Home() {
     isConnected,
     isPaused,
     isComplete,
-    currentQuestion,
-    confirmationPrompt,
+    activeMadlib,
+    activeConditional,
     formData,
     error,
     voiceStatus,
@@ -29,8 +29,9 @@ export default function Home() {
           isConnected={isConnected}
           isPaused={isPaused}
           isComplete={isComplete}
-          currentQuestion={currentQuestion}
-          confirmationPrompt={confirmationPrompt}
+          activeMadlib={activeMadlib}
+          activeConditional={activeConditional}
+          formData={formData}
           error={error}
           voiceStatus={voiceStatus}
           getFrequencyData={getFrequencyData}
@@ -45,7 +46,7 @@ export default function Home() {
       <div className="w-[400px] bg-gray-50 shrink-0">
         <FormSidebar
           formData={formData}
-          activeField={currentQuestion?.field ?? null}
+          activeSection={activeMadlib?.section ?? null}
         />
       </div>
     </div>
