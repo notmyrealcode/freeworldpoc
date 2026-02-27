@@ -11,7 +11,7 @@ interface MadlibCardProps {
   sectionTitle: string;
 }
 
-export default function MadlibCard({
+export function MadlibCard({
   template,
   fields,
   values,
