@@ -14,6 +14,7 @@ export default function Home() {
     formData,
     error,
     voiceStatus,
+    getFrequencyData,
     startSession,
     stopSession,
     pauseSession,
@@ -32,6 +33,7 @@ export default function Home() {
           confirmationPrompt={confirmationPrompt}
           error={error}
           voiceStatus={voiceStatus}
+          getFrequencyData={getFrequencyData}
           onStart={startSession}
           onStop={stopSession}
           onPause={pauseSession}

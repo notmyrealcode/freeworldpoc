@@ -30,7 +30,7 @@ export interface ConfirmationPrompt {
 //   "speaking"    — model audio is playing
 export type VoiceStatus = "listening" | "processing" | "speaking";
 
-export type FieldMachineState =
+type FieldMachineState =
   | "idle"
   | "welcome"
   | "asking"
@@ -54,7 +54,7 @@ interface UseGeminiSessionReturn {
   formData: SnapFormData;
   error: string | null;
   voiceStatus: VoiceStatus;
-  machineState: FieldMachineState;
+  getFrequencyData: () => Uint8Array | null;
   startSession: () => Promise<void>;
   stopSession: () => void;
   pauseSession: () => void;
@@ -99,6 +99,17 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     const completed = completedFieldsSummary(currentFormData);
     const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
     const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
+    const completedCount = FIELD_ORDER.filter(f => currentFormData[f.id] !== undefined).length;
+    const totalCount = FIELD_ORDER.filter(f => !f.skipIf || !f.skipIf(currentFormData)).length;
+    const progress = `Progress: ${completedCount}/${totalCount} fields done. Do NOT summarize until the system says all fields are done.`;
+
+    const isYesNo = field.type === "yes_no";
+    const isOptional = !field.required;
+    const toolInstruction = isYesNo
+      ? "Ask the user this yes/no question. After they answer, call field_complete directly with \"Yes\" or \"No\". Do NOT call confirm_value for yes/no questions."
+      : isOptional
+        ? "Ask the user for this value. If they say they don't have one, say \"no\", or want to skip, call field_complete with \"SKIP\". Otherwise, call confirm_value with their answer."
+        : "Ask the user for this value. After they answer, you MUST call the confirm_value function tool — do NOT just say the value back verbally.";
 
     if (isCorrection) {
       const currentValue = currentFormData[field.id] ?? "(no value)";
@@ -109,8 +120,9 @@ export function useGeminiSession(): UseGeminiSessionReturn {
         `Current value: ${currentValue}`,
         hints,
         `Previously completed: ${completed}`,
+        progress,
         "",
-        "The user wants to correct this value. Ask them for the updated value. After they answer, call confirm_value to display it on screen, then WAIT for their yes/no before calling field_complete.",
+        `The user wants to correct this value. Ask them for the updated value. ${isYesNo ? 'Call field_complete directly with "Yes" or "No".' : "You MUST call the confirm_value function tool — do NOT just say the value back verbally."}`,
       ].join("\n");
     }
 
@@ -120,8 +132,9 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       `Type: ${typeLabel}`,
       hints,
       `Previously completed: ${completed}`,
+      progress,
       "",
-      "Ask the user for this value. After they answer, call confirm_value to display it on screen, then WAIT for their yes/no before calling field_complete.",
+      toolInstruction,
     ].join("\n");
   }
 
@@ -130,6 +143,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     const typeLabel = field.required ? `${field.type}, required` : `${field.type}, optional`;
     const hints = field.hints ? `Hints: ${field.hints}` : "Hints: (none)";
 
+    const isYesNo = field.type === "yes_no";
     return [
       `Resuming: ${field.id}`,
       `Label: ${field.label}`,
@@ -137,7 +151,9 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       hints,
       `Previously completed: ${completed}`,
       "",
-      "A correction was just completed. Continue collecting this field from where you left off. After they answer, call confirm_value to display it on screen, then WAIT for their yes/no before calling field_complete.",
+      isYesNo
+        ? "A correction was just completed. Continue collecting this yes/no question. Call field_complete directly with \"Yes\" or \"No\"."
+        : "A correction was just completed. Continue collecting this field from where you left off. After they answer, you MUST call the confirm_value function tool — do NOT just say the value back verbally.",
     ].join("\n");
   }
 
@@ -149,8 +165,10 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       const session = sessionRef.current;
       if (!session) return;
 
+      const fieldText = buildFieldText(field, isCorrection, currentFormData);
+      console.log("[sendFieldMessage]", fieldText);
       session.sendClientContent({
-        turns: [{ role: "user", parts: [{ text: buildFieldText(field, isCorrection, currentFormData) }] }],
+        turns: [{ role: "user", parts: [{ text: fieldText }] }],
         turnComplete: true,
       });
     },
@@ -216,6 +234,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
         switch (name) {
           case "confirm_value": {
+            console.log("[confirm_value] field:", currentField?.id, "value:", args.value, "prompt:", args.prompt, "machineState:", fs.machineState);
             // Mask SSN on screen as defense-in-depth (Gemini should only send last 4, but just in case)
             const displayValue =
               currentField?.id === "ssn" ? maskSSN(args.value) : args.value;
@@ -224,15 +243,16 @@ export function useGeminiSession(): UseGeminiSessionReturn {
               value: displayValue,
               prompt: args.prompt,
             });
+            console.log("[confirm_value] setConfirmationPrompt called with:", { field: currentField?.id, value: displayValue, prompt: args.prompt });
             const confirmingState: FieldState = { ...fieldStateRef.current, machineState: "confirming" };
             setFieldState(confirmingState);
             fieldStateRef.current = confirmingState;
+            console.log("[confirm_value] state → confirming, fieldStateRef:", fieldStateRef.current);
             responses.push({
               id,
               name,
               response: {
-                result:
-                  "Value is now displayed on screen. STOP and wait for the user to verbally confirm or deny before calling field_complete. Do NOT call field_complete yet.",
+                result: "OK. Do not speak. Wait for the user's response.",
               },
             });
             // Send error responses for any remaining batched tool calls so Gemini doesn't hang
@@ -243,7 +263,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
                 name: dropped.name ?? "",
                 response: {
                   result:
-                    "error: blocked by confirmation gate. Wait for user confirmation before proceeding.",
+                    "PROTOCOL VIOLATION: This tool call was batched with confirm_value. You are in CONFIRMATION MODE — wait for the user's verbal response before taking any further action.",
                 },
               });
             }
@@ -251,29 +271,39 @@ export function useGeminiSession(): UseGeminiSessionReturn {
           }
 
           case "field_complete": {
-            // Reject if confirm_value wasn't called first — enforces the
-            // confirmation flow in code rather than relying on prompt compliance.
-            if (fs.machineState !== "confirming") {
+            console.log("[field_complete] field:", currentField?.id, "value:", args.value, "machineState:", fs.machineState);
+            // Yes/no fields and optional skips bypass confirmation — allow field_complete from asking/correcting state
+            const isYesNo = currentField?.type === "yes_no";
+            const isSkip = (args.value ?? "").toUpperCase() === "SKIP";
+            const canSkipConfirmation = isYesNo || isSkip;
+            const allowedStates: FieldMachineState[] = canSkipConfirmation
+              ? ["asking", "correcting", "confirming"]
+              : ["confirming"];
+            if (!allowedStates.includes(fs.machineState)) {
+              console.warn("[field_complete] BLOCKED — machineState is", fs.machineState, "not in", allowedStates);
               responses.push({
                 id,
                 name,
                 response: {
-                  result:
-                    "error: you must call confirm_value first to display the value on screen and wait for the user to say yes before calling field_complete.",
+                  result: canSkipConfirmation
+                    ? "PROTOCOL VIOLATION: field_complete called in wrong state. You should be in COLLECTION MODE."
+                    : "PROTOCOL VIOLATION: field_complete was called before the value was confirmed. You are still in COLLECTION MODE. You must first call confirm_value to display the value on the applicant's screen, then ask if it looks correct, and wait for their verbal yes. Only after they confirm can you call field_complete. (For optional fields the user wants to skip, call field_complete with value \"SKIP\".)",
                 },
               });
               break;
             }
 
-            // Normalize yes/no values so skipIf comparisons are consistent
+            // Normalize values
             const rawValue = args.value ?? "";
-            const confirmedValue =
-              currentField?.type === "yes_no"
+            const skipped = rawValue.toUpperCase() === "SKIP";
+            const confirmedValue = skipped
+              ? ""
+              : currentField?.type === "yes_no"
                 ? rawValue.toLowerCase().startsWith("y")
                   ? "Yes"
                   : "No"
                 : rawValue;
-            // Reject empty values for required fields
+            // Reject empty values for required fields (skips on required fields are blocked)
             if (currentField?.required && !confirmedValue.trim()) {
               responses.push({
                 id,
@@ -374,6 +404,17 @@ export function useGeminiSession(): UseGeminiSessionReturn {
           }
 
           case "mark_complete": {
+            if (fs.machineState !== "summary") {
+              responses.push({
+                id,
+                name,
+                response: {
+                  result:
+                    "PROTOCOL VIOLATION: mark_complete is only valid after all fields have been collected and summarized. Continue collecting fields.",
+                },
+              });
+              break;
+            }
             setFieldState((prev) => ({
               ...prev,
               machineState: "done",
@@ -434,6 +475,10 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     aiSpeakingRef.current = false;
   }, []);
 
+  const getFrequencyData = useCallback((): Uint8Array | null => {
+    return audioPlaybackRef.current?.getFrequencyData() ?? null;
+  }, []);
+
   const resumeSession = useCallback(() => {
     pausedRef.current = false;
     audioCaptureRef.current?.resume();
@@ -483,6 +528,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
       audioPlaybackRef.current = playback;
 
       // 4. Connect to Gemini Live API
+      console.log("[session] connecting with config:", JSON.stringify(SESSION_CONFIG, null, 2));
       const session = await ai.live.connect({
         model: GEMINI_MODEL,
         config: SESSION_CONFIG,
@@ -491,6 +537,11 @@ export function useGeminiSession(): UseGeminiSessionReturn {
             setIsConnected(true);
           },
           onmessage: (message: LiveServerMessage) => {
+            // Log message types (skip audio data to avoid console spam)
+            const msgTypes = Object.keys(message).filter(k => k !== 'serverContent' || !message.serverContent?.modelTurn);
+            if (msgTypes.length > 0 || message.serverContent?.turnComplete || message.toolCall) {
+              console.log("[ws-msg]", message.toolCall ? "toolCall" : message.serverContent?.turnComplete ? "turnComplete" : message.serverContent?.modelTurn ? "audio" : JSON.stringify(message).slice(0, 200));
+            }
             // Discard incoming data while paused so the session doesn't
             // advance to questions the user never heard
             if (pausedRef.current) return;
@@ -514,15 +565,17 @@ export function useGeminiSession(): UseGeminiSessionReturn {
 
             // Model turn complete — back to listening
             if (message.serverContent?.turnComplete) {
-              // Only set listening if playback has already stopped;
-              // otherwise the playback onended callback will handle it
-              if (!playback.isPlaying) {
-                setVoiceStatus("listening");
-              }
+              console.log("[turnComplete] machineState:", fieldStateRef.current.machineState, "isPlaying:", playback.isPlaying, "aiSpeaking:", aiSpeakingRef.current);
 
               // After welcome turn completes, send the first field
+              // Skip setting "listening" — go straight to "processing" since we're
+              // immediately sending the first field instruction
               const fs = fieldStateRef.current;
               if (fs.machineState === "welcome") {
+                // Stay in "processing" (or "speaking") — don't flash "listening"
+                setVoiceStatus("processing");
+                aiSpeakingRef.current = true; // suppress mic until first question audio arrives
+
                 fieldStateRef.current = { ...fs, machineState: "asking" };
 
                 const currentFormData = formDataRef.current;
@@ -545,14 +598,21 @@ export function useGeminiSession(): UseGeminiSessionReturn {
                   setCurrentQuestion({ field: field.id, question: field.label });
                   sendFieldMessage(field, false, currentFormData);
                 }
+              } else {
+                // Normal turn complete — back to listening
+                if (!playback.isPlaying) {
+                  setVoiceStatus("listening");
+                }
               }
             }
 
             // Handle function calls — use ref to avoid sending on dead socket
             if (message.toolCall?.functionCalls) {
+              console.log("[tool-call] received:", message.toolCall.functionCalls.map(fc => `${fc.name}(${JSON.stringify(fc.args)})`).join(", "));
               setVoiceStatus("processing");
               aiSpeakingRef.current = false; // tool calls don't produce audio
               const responses = handleFunctionCall(message.toolCall.functionCalls);
+              console.log("[tool-call] responses:", responses.map(r => `${r.name} → ${r.response.result.slice(0, 80)}`).join(", "));
               sessionRef.current?.sendToolResponse({
                 functionResponses: responses,
               });
@@ -562,7 +622,8 @@ export function useGeminiSession(): UseGeminiSessionReturn {
             console.error("Gemini session error:", e.message || e.error || e);
             setError(e.message || "WebSocket connection error");
           },
-          onclose: () => {
+          onclose: (e: CloseEvent) => {
+            console.error("[session] closed:", e.code, e.reason);
             cleanup();
           },
         },
@@ -648,7 +709,7 @@ export function useGeminiSession(): UseGeminiSessionReturn {
     formData,
     error,
     voiceStatus,
-    machineState: fieldState.machineState,
+    getFrequencyData,
     startSession,
     stopSession,
     pauseSession,

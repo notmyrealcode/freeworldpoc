@@ -6,9 +6,23 @@ export class AudioPlayback {
   private activeSources: AudioBufferSourceNode[] = [];
   private onPlayingChange: ((playing: boolean) => void) | null = null;
 
+  // Audio analysis for visualization
+  private gainNode: GainNode;
+  private analyserNode: AnalyserNode;
+  private frequencyData: Uint8Array<ArrayBuffer>;
+
   constructor(onPlayingChange?: (playing: boolean) => void) {
     this.audioContext = new AudioContext({ sampleRate: 24000 });
     this.onPlayingChange = onPlayingChange ?? null;
+
+    // Route: source → gainNode → analyserNode → destination
+    this.gainNode = this.audioContext.createGain();
+    this.analyserNode = this.audioContext.createAnalyser();
+    this.analyserNode.fftSize = 32;
+    this.frequencyData = new Uint8Array(this.analyserNode.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+
+    this.gainNode.connect(this.analyserNode);
+    this.analyserNode.connect(this.audioContext.destination);
   }
 
   get isPlaying(): boolean {
@@ -56,7 +70,7 @@ export class AudioPlayback {
 
     const source = this.audioContext.createBufferSource();
     source.buffer = buffer;
-    source.connect(this.audioContext.destination);
+    source.connect(this.gainNode);
 
     const currentTime = this.audioContext.currentTime;
     const startTime = Math.max(currentTime, this.nextStartTime);
@@ -86,6 +100,11 @@ export class AudioPlayback {
     this.activeSources = [];
     this.nextStartTime = 0;
     this.setPlaying(false);
+  }
+
+  getFrequencyData(): Uint8Array {
+    this.analyserNode.getByteFrequencyData(this.frequencyData);
+    return this.frequencyData;
   }
 
   async resumeAudioContext(): Promise<void> {

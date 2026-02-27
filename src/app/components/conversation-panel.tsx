@@ -6,6 +6,7 @@ import type {
   ConfirmationPrompt,
   VoiceStatus,
 } from "@/app/hooks/use-gemini-session";
+import { AudioVisualizer } from "./audio-visualizer";
 
 interface ConversationPanelProps {
   isConnected: boolean;
@@ -15,6 +16,7 @@ interface ConversationPanelProps {
   confirmationPrompt: ConfirmationPrompt | null;
   error: string | null;
   voiceStatus: VoiceStatus;
+  getFrequencyData: (() => Uint8Array | null) | null;
   onStart: () => void;
   onStop: () => void;
   onPause: () => void;
@@ -95,11 +97,13 @@ export function ConversationPanel({
   confirmationPrompt,
   error,
   voiceStatus,
+  getFrequencyData,
   onStart,
   onStop,
   onPause,
   onResume,
 }: ConversationPanelProps) {
+  console.log("[render] isConnected:", isConnected, "isPaused:", isPaused, "confirmationPrompt:", confirmationPrompt, "currentQuestion:", currentQuestion);
   return (
     <div className="h-full flex flex-col items-center justify-center p-8">
       {/* Current question display */}
@@ -150,47 +154,6 @@ export function ConversationPanel({
             <p className="text-2xl font-medium text-gray-900 leading-relaxed">
               {currentQuestion.question}
             </p>
-            {voiceStatus === "processing" && (
-              <span className="inline-flex items-center gap-2 text-sm text-amber-600 mt-3">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500" />
-                </span>
-                Processing...
-              </span>
-            )}
-          </div>
-        )}
-
-        {isConnected && !isPaused && !confirmationPrompt && !currentQuestion && (
-          <div className="text-center">
-            <div className="inline-flex items-center gap-2 text-gray-500">
-              {voiceStatus === "listening" ? (
-                <>
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500" />
-                  </span>
-                  Listening...
-                </>
-              ) : voiceStatus === "processing" ? (
-                <>
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500" />
-                  </span>
-                  Processing...
-                </>
-              ) : (
-                <>
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
-                  </span>
-                  Assistant is speaking...
-                </>
-              )}
-            </div>
           </div>
         )}
 
@@ -207,22 +170,40 @@ export function ConversationPanel({
         )}
       </div>
 
-      {/* Audio visualizer — hidden when paused */}
+      {/* Voice status + audio visualizer — hidden when paused */}
       {isConnected && !isPaused && (
-        <div className="w-full max-w-md h-16 mb-6 flex items-center justify-center">
-          <div className="flex items-center gap-1">
-            {[20, 32, 24, 36, 28].map((h, i) => (
-              <div
-                key={i}
-                className="w-1.5 bg-blue-500 rounded-full animate-pulse"
-                style={{
-                  height: `${h}px`,
-                  animationDelay: `${i * 0.15}s`,
-                  animationDuration: "0.8s",
-                }}
-              />
-            ))}
+        <div className="mb-6 flex flex-col items-center">
+          <div className="inline-flex items-center gap-2 text-sm text-gray-500 mb-2">
+            {voiceStatus === "listening" ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                </span>
+                Listening...
+              </>
+            ) : voiceStatus === "processing" ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500" />
+                </span>
+                Processing...
+              </>
+            ) : (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                </span>
+                Assistant is speaking...
+              </>
+            )}
           </div>
+          <AudioVisualizer
+            voiceStatus={voiceStatus}
+            getFrequencyData={getFrequencyData}
+          />
         </div>
       )}
 

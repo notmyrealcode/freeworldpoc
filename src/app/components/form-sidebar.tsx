@@ -65,13 +65,8 @@ function SectionStatus({
           const value = formData[field.id];
           const isFieldActive = field.id === activeField;
 
-          // Hide mailing address fields if they said "No"
-          // Values are normalized to "Yes"/"No"; toLowerCase is belt-and-suspenders
-          if (
-            field.section === "Mailing Address" &&
-            field.id !== "has_different_mailing" &&
-            formData.has_different_mailing?.toLowerCase() === "no"
-          ) {
+          // Hide fields whose skip condition is met (e.g. mailing address when same as home)
+          if (field.skipIf && field.skipIf(formData)) {
             return null;
           }
 
