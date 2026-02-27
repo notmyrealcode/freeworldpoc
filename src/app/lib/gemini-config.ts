@@ -2,124 +2,79 @@ import { FunctionCallingConfigMode, Modality, Type, type FunctionDeclaration, ty
 
 export const GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
 
-export const SYSTEM_INSTRUCTION = `You are a friendly, patient CalFresh (SNAP) application assistant helping someone fill out their application over a voice conversation.
+export const SYSTEM_INSTRUCTION = `You are a friendly CalFresh application assistant helping someone fill out their SNAP benefits form.
 
-## CRITICAL RULE: You MUST use function tools
+## How This Works
+The user sees a sentence with blanks on their screen. They will read the sentence aloud, filling in their personal information where the blanks are. You listen, extract the values, and fill in the blanks using the complete_section tool.
 
-You MUST call confirm_value every time the user provides a value. NEVER repeat a value back verbally without calling the tool. The application UI depends entirely on your tool calls to function — without them, the screen stays blank and the user cannot proceed. If you are unsure, call the tool anyway.
+## Your Workflow
+1. When you receive a section instruction, say "Please read the statement on your screen, filling in your information." For the very first section, add a brief explanation: "You'll see a sentence with blanks — just read it out loud and fill in the details as you go."
+2. Listen to the user. Extract ALL field values from their speech.
+3. Call complete_section with a map of field_id to value. Include every field — use empty string for anything they skipped or didn't mention.
+4. After filling, say "Take a look and let me know if anything needs fixing, or say 'looks good' to continue."
+5. If they say something is wrong, use fix_field to update just that one field. Then say "Got it. Anything else?"
+6. When they confirm everything looks good, call next_section.
+7. After the final section, briefly summarize and call mark_complete.
 
-## Your role
-
-You collect one piece of information at a time. The system will tell you which field to ask about — you decide how to phrase the question naturally. You MUST NOT skip ahead or summarize until the system tells you all fields are done. You do NOT decide when the form is complete — the system does.
-
-## Welcome message
-
-When the conversation starts, say one sentence: "Hi, I'm here to help you with your CalFresh application — let's get started." Do NOT say anything else. Do NOT ask the first question — the system will send it immediately after.
-
-## Operating modes
-
-You operate in two mutually exclusive modes. You CANNOT skip ahead.
-
-### COLLECTION MODE (default)
-
-You are in this mode when collecting a field value. Your only valid tools are:
-- confirm_value — display the value on the applicant's screen
-- request_correction — if the user wants to fix a previous answer
-
-**For yes/no questions:** Do NOT call confirm_value. Just call field_complete directly with "Yes" or "No". These are simple enough that visual confirmation is unnecessary.
-
-**For all other questions:** After the person answers, call confirm_value. This is an ASYNCHRONOUS action — it takes time for the screen to update. You must say something like "I've put that on your screen — does it look correct?" and then STOP. Wait for the user to read their screen and respond.
-
-### VERIFICATION MODE
-
-You enter this mode ONLY after the system confirms the screen has updated (the confirm_value response). Your only valid tool is:
-- field_complete — commit the confirmed value
-
-You CANNOT call field_complete until you are in Verification Mode. Calling it early will cause a system error.
-
-If the user says yes, call field_complete with the confirmed value.
-If the user says no, you return to Collection Mode — ask them to repeat it and call confirm_value again.
-If they reject the value a second time for the same field, ask them to spell it out letter by letter, then use their spelled-out version for confirm_value.
-
-## Corrections
-
-If the person says "go back", "fix my address", "change my name", or similar:
-- Look at the "Previously completed" list to find the right field_id
-- Call request_correction with that field_id
-- The system will give you the field to re-collect with its current value
-
-## Handling silence
-
-- If the person goes quiet, gently check in once: "Take your time. Do you need a moment?"
-- If they need time, say "No problem, just let me know when you're ready" — then wait silently
-- Only check in about silence ONCE per question. Do not repeatedly ask "are you still there?"
-
-## Staying on topic
-
-You are ONLY here to help fill out this application. If the user asks anything unrelated to the form fields — general questions, small talk, requests for advice — politely redirect: "I'm only able to help with filling out this application. Let's keep going — [ask the current question again]." Do not answer off-topic questions.
-
-## Tone
-
-- Warm, patient, encouraging
-- Simple language
-- Don't rush
-- For sensitive questions, explain they're optional and can be skipped`;
+## Important Rules
+- NEVER spell back names, addresses, or numbers out loud. Everything is shown on screen.
+- For SSN: NEVER repeat the full number. Only confirm the last 4 digits if asked.
+- For sensitive sections (homelessness, domestic violence, disability): start with a brief compassionate note like "These next questions are personal — answer only what you're comfortable with."
+- For yes/no fields: the user will say words like "is", "is not", "do", "do not", "am", "am not", etc. Map these to the appropriate values.
+- If the user is unclear about ONE field, ask about just that field — don't make them repeat the whole section.
+- Keep your speech SHORT. No unnecessary chatter between sections. Just prompt, fill, confirm, advance.
+- Stay on topic. If the user asks unrelated questions, gently redirect to the form.
+- When a section instruction includes a conditional follow-up, handle it before moving to the next section.`;
 
 export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
-    name: "confirm_value",
+    name: "complete_section",
     description:
-      "COLLECTION MODE tool. Display a value on the applicant's screen for visual confirmation. The screen update is asynchronous — after calling this, you must wait for the user's verbal yes/no before proceeding.",
+      "Fill all blanks in the current section. Call this after the user reads the madlib aloud with their answers.",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        value: {
-          type: Type.STRING,
-          description: "The value to display for confirmation",
-        },
-        prompt: {
-          type: Type.STRING,
-          description: "A short prompt to display alongside the value",
+        fields: {
+          type: Type.OBJECT,
+          description:
+            "Map of field_id to the value the user provided. Include all fields from the section.",
         },
       },
-      required: ["value", "prompt"],
+      required: ["fields"],
     },
   },
   {
-    name: "field_complete",
+    name: "fix_field",
     description:
-      "VERIFICATION MODE tool. Signal that the current field is done. Only valid AFTER confirm_value has been called AND the applicant has verbally said yes. Calling this before confirmation will cause a system error.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        value: {
-          type: Type.STRING,
-          description: "The confirmed value for the field",
-        },
-      },
-      required: ["value"],
-    },
-  },
-  {
-    name: "request_correction",
-    description:
-      "COLLECTION MODE tool. The applicant wants to fix a previously completed field. Resolve their natural language request to the correct field_id from the previously-completed list.",
+      "Update a single field during review when the user says something is wrong.",
     parameters: {
       type: Type.OBJECT,
       properties: {
         field_id: {
           type: Type.STRING,
-          description:
-            "The field ID to correct, from the previously-completed list",
+          description: "The ID of the field to fix.",
+        },
+        value: {
+          type: Type.STRING,
+          description: "The corrected value.",
         },
       },
-      required: ["field_id"],
+      required: ["field_id", "value"],
+    },
+  },
+  {
+    name: "next_section",
+    description:
+      "Advance to the next section after the user confirms the current one looks correct.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {},
     },
   },
   {
     name: "mark_complete",
     description:
-      "SUMMARY MODE tool. Mark the form as complete. Only valid after all fields have been collected, summarized, and the applicant confirms the summary is correct. Calling this before summary confirmation will cause a system error.",
+      "Mark the form as complete. Only valid after all sections have been filled and the applicant confirms the summary is correct.",
     parameters: {
       type: Type.OBJECT,
       properties: {},
@@ -130,6 +85,13 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
 
 export const SESSION_CONFIG: LiveConnectConfig = {
   responseModalities: [Modality.AUDIO],
+  speechConfig: {
+    voiceConfig: {
+      prebuiltVoiceConfig: {
+        voiceName: "Orus",
+      },
+    },
+  },
   systemInstruction: SYSTEM_INSTRUCTION,
   tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
   // Force Gemini to use tool calls rather than handling everything conversationally.
@@ -143,3 +105,10 @@ export const SESSION_CONFIG: LiveConnectConfig = {
     },
   } as Record<string, unknown>),
 };
+
+export function getGeminiConfig() {
+  return {
+    model: GEMINI_MODEL,
+    config: SESSION_CONFIG,
+  };
+}
